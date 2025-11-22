@@ -29,8 +29,8 @@ git clone https://github.com/kvasios/franka-handeye.git
 cd franka-handeye
 
 # Create and activate environment (micromamba or conda)
-micromamba create -n handeye python=3.10
-micromamba activate handeye
+micromamba create -n franka-handeye python=3.10
+micromamba activate franka-handeye
 
 # Install dependencies
 pip install -r requirements.txt
