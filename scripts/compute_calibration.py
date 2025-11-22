@@ -178,7 +178,6 @@ def compute_error_metrics(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
 def main():
     parser = argparse.ArgumentParser(description="Compute Hand-Eye Calibration")
     parser.add_argument("--data", default="data/captured-data", help="Directory with captured data")
-    parser.add_argument("--method", default="daniilidis", help="Calibration method (daniilidis, tsai, etc.)")
     parser.add_argument("--plot", action="store_true", help="Show 3D plot of frames")
     args = parser.parse_args()
 
@@ -188,24 +187,14 @@ def main():
         print("Error: Need at least 3 poses for calibration.")
         return
 
-    print("Running calibration...")
-    
-    method_dict = {
-        "daniilidis": cv2.CALIB_HAND_EYE_DANIILIDIS,
-        "tsai": cv2.CALIB_HAND_EYE_TSAI,
-        "park": cv2.CALIB_HAND_EYE_PARK,
-        "horaud": cv2.CALIB_HAND_EYE_HORAUD,
-        "andrei": cv2.CALIB_HAND_EYE_ANDREI
-    }
-    
-    method = method_dict.get(args.method.lower(), cv2.CALIB_HAND_EYE_DANIILIDIS)
+    print("Running calibration using DANIILIDIS method...")
     
     R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
         R_gripper2base=R_g2b,
         t_gripper2base=t_g2b,
         R_target2cam=R_t2c,
         t_target2cam=t_t2c,
-        method=method
+        method=cv2.CALIB_HAND_EYE_DANIILIDIS
     )
 
     print("\nCalibration Result (T_cam_gripper):")

@@ -193,14 +193,18 @@ class ManualCaptureApp:
             state = self.robot.state
             
             # Format Cartesian Pose (Translation + Quat or Matrix)
-            # O_T_EE is usually a 16-element list/array (column-major 4x4)
-            O_T_EE = np.array(state.O_T_EE).reshape(4, 4, order='F') 
-            trans = O_T_EE[:3, 3]
+            # O_T_EE is an Affine object. We can access .translation directly.
+            # translation is a 3x1 array/list
+            O_T_EE_affine = state.O_T_EE
+            trans_remote = O_T_EE_affine.translation
+            trans = [trans_remote[i] for i in range(3)]
             
             self.lbl_cartesian.configure(text=f"Pos: [{trans[0]:.3f}, {trans[1]:.3f}, {trans[2]:.3f}]")
             
             # Format Joints
-            q = np.array(state.q)
+            # Manual copy from RPyC
+            q_remote = state.q
+            q = [q_remote[i] for i in range(len(q_remote))]
             q_str = ", ".join([f"{x:.2f}" for x in q])
             self.lbl_joints.configure(text=f"Joints: [{q_str}]")
             
@@ -326,8 +330,25 @@ class ManualCaptureApp:
             return
             
         state = self.robot.state
-        q = state.q
-        O_T_EE = state.O_T_EE
+        # Convert to standard python types to avoid JSON serialization errors with numpy scalars
+        # Iterate manually over RPyC netref arrays because direct numpy conversion relies on pickling which is disabled
+        q_remote = state.q
+        q = [float(q_remote[i]) for i in range(len(q_remote))]
+        
+        # O_T_EE is an Affine object, not a list/array. We must access its .matrix property.
+        # .matrix returns a numpy array (likely 4x4), but accessing it via RPyC might still return a netref 
+        # that we can't pickle-convert. We have to iterate over it manually.
+        # Assuming .matrix returns a 4x4 array/list-like structure.
+        O_T_EE_affine = state.O_T_EE
+        O_T_EE_matrix_remote = O_T_EE_affine.matrix
+        
+        # Since it's likely a 2D array (4x4), we need nested iteration or flattening
+        # Explicitly convert each element to float to avoid numpy.float64 serialization issues
+        O_T_EE = []
+        for r in range(4):
+            row_remote = O_T_EE_matrix_remote[r]
+            row = [float(row_remote[c]) for c in range(4)]
+            O_T_EE.extend(row) # Flattening to 16-element list as expected by downstream code
         
         valid, rvec, tvec = self.current_detection
         
@@ -339,7 +360,7 @@ class ManualCaptureApp:
         cv2.imwrite(str(pose_dir / "image.png"), self.last_frame)
         
         data = {
-            "joint_pose": list(q),
+            "joint_pose": q,
             "O_T_EE": O_T_EE,
             "camera_intrinsics": self.K,
             "dist_coeffs": self.D,
@@ -347,13 +368,13 @@ class ManualCaptureApp:
         }
         
         if valid:
-            data["T_cam_target_rvec"] = rvec.tolist()
-            data["T_cam_target_tvec"] = tvec.tolist()
+            data["T_cam_target_rvec"] = rvec.tolist() if hasattr(rvec, 'tolist') else rvec
+            data["T_cam_target_tvec"] = tvec.tolist() if hasattr(tvec, 'tolist') else tvec
             
         with open(pose_dir / "data.json", 'w') as f:
             json.dump(data, f, indent=4, cls=NumpyEncoder)
             
-        self.captured_poses.append(list(q))
+        self.captured_poses.append(q)
         self.captured_count += 1
         self.lbl_count.configure(text=f"Captured: {self.captured_count}/{self.target_captures}")
         print(f"Captured pose {pose_idx}")
@@ -367,8 +388,14 @@ class ManualCaptureApp:
 
     def save_joint_poses(self):
         path = "config/joint_poses.yaml"
+        # Format each pose on a single line for readability
+        yaml_content = "joint_poses:\n"
+        for pose in self.captured_poses:
+            pose_str = "  - [" + ", ".join([f"{x:.4f}" for x in pose]) + "]\n"
+            yaml_content += pose_str
+        
         with open(path, 'w') as f:
-            yaml.dump({"joint_poses": self.captured_poses}, f)
+            f.write(yaml_content)
 
     def on_close(self):
         self.stop_thread = True
@@ -394,7 +421,7 @@ def run_automatic(robot, camera, detector, joint_poses, output_dir, K, D):
             if frame is None: continue
             
             state = robot.state
-            O_T_EE = state.O_T_EE
+            O_T_EE = np.array(state.O_T_EE).tolist()
             
             valid, rvec, tvec, _ = detector.detect(frame, K, D)
             
