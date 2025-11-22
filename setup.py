@@ -10,7 +10,7 @@ setup(
         "pyrealsense2",
         "PyYAML",
         "scipy",
+        "matplotlib",
         "franky-remote", 
     ],
 )
-
