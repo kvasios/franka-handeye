@@ -86,7 +86,6 @@ ipython_config.py
 *.jpg
 *.png
 *.jpeg
-*.gif
 *.bmp
 *.tiff
 *.webp
