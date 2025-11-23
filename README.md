@@ -60,7 +60,41 @@ The file `config/joint_poses.yaml` must contain exactly **12 joint configuration
 
 ## Usage
 
-### Step 1: Data Capture
+### Quick Start - Complete Workflow
+
+The easiest way to run the entire calibration pipeline is using the main orchestration script:
+
+```bash
+# Set the Franka Server IP (Real-Time Machine IP)
+export FRANKY_SERVER_IP=192.168.1.X 
+
+# Run the complete workflow
+python run_calibration.py --host <ROBOT_FCI_IP>
+```
+
+This will automatically:
+1. Capture data from all 12 poses
+2. Compute the hand-eye calibration (with 3D visualization)
+3. Verify the calibration by visiting the board center and corners
+
+**Optional arguments:**
+- `--host`: Robot FCI IP address (default: `172.16.0.2`)
+- `--verify-offset`: Distance from board during verification in meters (default: `0.06`)
+
+**Example with custom offset:**
+```bash
+python run_calibration.py --host 172.16.0.2 --verify-offset 0.03
+```
+
+**Note:** If you need more control (e.g., running only specific steps), use the individual scripts described in the Manual Steps section below.
+
+---
+
+### Manual Steps (Advanced)
+
+If you prefer to run each step individually for more control:
+
+#### Step 1: Data Capture
 
 The capture script automatically moves the robot through all 12 joint poses defined in `config/joint_poses.yaml`, captures images with the RealSense camera, detects the Charuco board, and records the robot state.
 
@@ -87,7 +121,7 @@ The script will:
 - `image.png`: Captured camera image
 - `data.json`: Robot state, camera intrinsics, and Charuco detection results
 
-### Step 2: Compute Calibration
+#### Step 2: Compute Calibration
 
 After successfully capturing data from all 12 poses, run the calibration script to compute the hand-eye transformation (camera-to-gripper transform).
 
@@ -118,7 +152,7 @@ The script will:
 python scripts/compute_calibration.py --plot
 ```
 
-### Step 3: Verify Calibration (Optional but Recommended)
+#### Step 3: Verify Calibration (Optional but Recommended)
 
 To validate the calibration, you can run a verification script that uses the computed transformation to align the robot with the charuco board.
 
@@ -141,9 +175,15 @@ This script will:
 
 ## Workflow Summary
 
+### Complete Workflow (Recommended)
+```bash
+python run_calibration.py --host <ROBOT_IP>
+```
+
+### Individual Steps (For Advanced Control)
 1. **Setup**: Ensure server is running and configuration files are correct
 2. **Capture**: `python scripts/capture_data.py --host <ROBOT_IP>`
-3. **Calibrate**: `python scripts/compute_calibration.py [--plot]`
-4. **Verify**: `python scripts/verify_calibration.py --host <ROBOT_IP>` (optional)
+3. **Calibrate**: `python scripts/compute_calibration.py --plot`
+4. **Verify**: `python scripts/verify_calibration.py --host <ROBOT_IP>`
 5. **Result**: Use the transformation from `data/hand-eye-calibration-output/calibration_result.json`
 
