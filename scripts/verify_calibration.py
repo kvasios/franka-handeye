@@ -419,7 +419,7 @@ def main():
             # Move to corner
             print(f"🤖 Moving to {corner_name} corner...")
             target_affine_corner = Affine(translation_corner, quaternion_corner)
-            motion_corner = CartesianMotion(target_affine_corner, ReferenceType.Absolute, 0.4)
+            motion_corner = CartesianMotion(target_affine_corner, ReferenceType.Absolute, 0.1)
             robot.move(motion_corner)
             print(f"✓ Reached {corner_name} corner")
             
