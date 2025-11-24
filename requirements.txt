@@ -1,9 +1,14 @@
-numpy
-opencv-contrib-python
-pyrealsense2
-PyYAML
-scipy
-matplotlib
-Pillow
-dearpygui
+# Core dependencies
+numpy>=1.24.0
+opencv-contrib-python>=4.8.0
+pyrealsense2>=2.54.0
+PyYAML>=6.0
+scipy>=1.11.0
+matplotlib>=3.7.0
+Pillow>=10.0.0
+
+# GUI
+dearpygui>=1.10.0
+
+# Robot control (custom fork with remote capabilities)
 git+https://github.com/kvasios/franky-remote.git

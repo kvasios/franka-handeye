@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "franka-handeye"
+version = "0.2.0"
+description = "Hand-eye calibration toolkit for Franka robot with RealSense camera"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "kvasios"}
+]
+keywords = ["robotics", "calibration", "hand-eye", "franka", "realsense", "charuco"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Robotics",
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "opencv-contrib-python>=4.8.0",
+    "pyrealsense2>=2.54.0",
+    "PyYAML>=6.0",
+    "scipy>=1.11.0",
+    "matplotlib>=3.7.0",
+    "Pillow>=10.0.0",
+    "dearpygui>=1.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/kvasios/franka-handeye"
+Repository = "https://github.com/kvasios/franka-handeye"
+
+[project.scripts]
+franka-handeye-app = "franka_handeye_app:main"
+
+[tool.setuptools.packages.find]
+include = ["franka_handeye*", "scripts*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+

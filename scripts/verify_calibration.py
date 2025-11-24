@@ -1,171 +1,59 @@
-import os
-import argparse
-import yaml
+#!/usr/bin/env python3
+"""
+Franka Hand-Eye Calibration - Verification Script
+
+Verifies calibration by moving robot to align with charuco board.
+Can be run standalone or imported as a module.
+
+Usage:
+    python scripts/verify_calibration.py --host 172.16.0.2 --offset 0.06
+"""
+
+import sys
 import time
+import argparse
 import numpy as np
 import cv2
-import pyrealsense2 as rs
-import json
 from pathlib import Path
-
-# Set default server IP
-os.environ.setdefault("FRANKY_SERVER_IP", "192.168.122.100")
-
 from scipy.spatial.transform import Rotation as R
-from franky import Robot, CartesianMotion, Affine, JointMotion, Gripper, ReferenceType
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
-class RealSenseCamera:
-    def __init__(self):
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
-        self.profile = self.pipeline.start(self.config)
-        self.color_stream = self.profile.get_stream(rs.stream.color)
-        self.intrinsics = self.color_stream.as_video_stream_profile().get_intrinsics()
+# Add parent directory to path for standalone execution
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-    def get_frame(self):
-        frames = self.pipeline.wait_for_frames()
-        color_frame = frames.get_color_frame()
-        if not color_frame:
-            return None
-        return np.asanyarray(color_frame.get_data())
+from franka_handeye import (
+    RealSenseCamera,
+    CharucoDetector,
+    RobotController,
+    load_calibration_result,
+    compute_alignment_pose,
+)
 
-    def get_intrinsics_matrix(self):
-        K = np.array([
-            [self.intrinsics.fx, 0, self.intrinsics.ppx],
-            [0, self.intrinsics.fy, self.intrinsics.ppy],
-            [0, 0, 1]
-        ])
-        dist_coeffs = np.array(self.intrinsics.coeffs)
-        return K, dist_coeffs
-
-    def stop(self):
-        self.pipeline.stop()
-
-class CharucoDetector:
-    def __init__(self, params_path):
-        with open(params_path, 'r') as f:
-            params = yaml.safe_load(f)
-        self.board_size = params['board_size']
-        self.square_length = params['square_length']
-        self.board = cv2.aruco.CharucoBoard(
-            (params['board_size'][0], params['board_size'][1]),
-            params['square_length'],
-            params['marker_length'],
-            cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-        )
-        self.dictionary = self.board.getDictionary()
-        self.params = cv2.aruco.DetectorParameters()
-    
-    def get_board_dimensions(self):
-        """Get physical dimensions of the board in meters."""
-        width = self.board_size[0] * self.square_length
-        height = self.board_size[1] * self.square_length
-        return width, height
-
-    def detect(self, image, K, D):
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = cv2.aruco.detectMarkers(gray, self.dictionary, parameters=self.params)
-        if ids is not None and len(ids) > 0:
-            _, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(corners, ids, gray, self.board)
-            if charuco_corners is not None and len(charuco_corners) > 3:
-                valid, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(charuco_corners, charuco_ids, self.board, K, D, None, None)
-                return valid, rvec, tvec
-        return False, None, None
-
-def load_calibration(calib_path):
-    """Load the hand-eye calibration result."""
-    with open(calib_path, 'r') as f:
-        calib = json.load(f)
-    
-    T_cam_gripper = np.array(calib['T_cam_gripper'])
-    return T_cam_gripper
-
-def compute_alignment_pose(T_gripper_base_current, T_cam_gripper, rvec, tvec, offset_distance=0.1, target_point_in_board=[0, 0, 0]):
-    """
-    Compute the desired gripper pose to align END EFFECTOR with charuco board.
-    
-    Args:
-        T_gripper_base_current: Current gripper pose in base frame (4x4)
-        T_cam_gripper: Camera to gripper transform from calibration (4x4)
-        rvec: Rotation vector of target in camera frame
-        tvec: Translation vector of target in camera frame
-        offset_distance: Distance to maintain from board (meters)
-        target_point_in_board: [x, y, z] point in board frame to align with (default: origin)
-    
-    Returns:
-        T_gripper_base_desired: Desired gripper pose in base frame (4x4)
-    """
-    # Convert rvec, tvec to transformation matrix
-    R_target_cam, _ = cv2.Rodrigues(rvec)
-    t_target_cam = tvec.flatten()
-    
-    T_target_cam = np.eye(4)
-    T_target_cam[:3, :3] = R_target_cam
-    T_target_cam[:3, 3] = t_target_cam
-    
-    # Current camera pose in base frame
-    T_cam_base_current = T_gripper_base_current @ T_cam_gripper
-    
-    # Target (charuco board) pose in base frame
-    T_target_base = T_cam_base_current @ T_target_cam
-    
-    # Desired gripper pose: aligned with charuco board at target_point, offset along Z axis (normal)
-    # The gripper frame should match the board's orientation
-    # Offset by offset_distance along the board's Z-axis (pointing away from board)
-    T_gripper_target_desired = np.eye(4)
-    T_gripper_target_desired[:3, 3] = [
-        target_point_in_board[0], 
-        target_point_in_board[1], 
-        target_point_in_board[2] - offset_distance
-    ]
-    
-    # Desired gripper pose in base frame
-    T_gripper_base_desired = T_target_base @ T_gripper_target_desired
-    
-    return T_gripper_base_desired
-
-def get_board_corners(board_width, board_height):
-    """
-    Get the 4 corners of the charuco board in the board's frame.
-    
-    OpenCV charuco frame: origin at top-left, X right, Y down, Z out.
-    
-    Args:
-        board_width: Width of board in meters
-        board_height: Height of board in meters
-    
-    Returns:
-        List of 4 corner positions [x, y, z] in board frame
-    """
-    corners = [
-        [0, 0, 0],                          # Top-left
-        [board_width, 0, 0],                # Top-right
-        [board_width, board_height, 0],     # Bottom-right
-        [0, board_height, 0]                # Bottom-left
-    ]
-    return corners
 
 def plot_verification(T_gripper_base, T_cam_gripper, T_target_cam):
     """
     Plot the frames after verification movement.
     
-    Args:
-        T_gripper_base: 4x4 matrix (Gripper in Base)
-        T_cam_gripper: 4x4 matrix (Camera in Gripper - Calibration result)
-        T_target_cam: 4x4 matrix (Target in Camera - Detection result)
+    Parameters
+    ----------
+    T_gripper_base : np.ndarray
+        4x4 matrix (Gripper in Base).
+    T_cam_gripper : np.ndarray
+        4x4 matrix (Camera in Gripper - Calibration result).
+    T_target_cam : np.ndarray
+        4x4 matrix (Target in Camera - Detection result).
     """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     
     def plot_frame(T, label, scale=0.1):
-        R = T[:3, :3]
+        R_mat = T[:3, :3]
         t = T[:3, 3]
-        ax.quiver(t[0], t[1], t[2], R[0,0], R[1,0], R[2,0], length=scale, color='r')
-        ax.quiver(t[0], t[1], t[2], R[0,1], R[1,1], R[2,1], length=scale, color='g')
-        ax.quiver(t[0], t[1], t[2], R[0,2], R[1,2], R[2,2], length=scale, color='b')
+        ax.quiver(t[0], t[1], t[2], R_mat[0,0], R_mat[1,0], R_mat[2,0], length=scale, color='r')
+        ax.quiver(t[0], t[1], t[2], R_mat[0,1], R_mat[1,1], R_mat[2,1], length=scale, color='g')
+        ax.quiver(t[0], t[1], t[2], R_mat[0,2], R_mat[1,2], R_mat[2,2], length=scale, color='b')
         ax.text(t[0], t[1], t[2], label)
 
     # Plot Base Frame (0,0,0)
@@ -175,12 +63,10 @@ def plot_verification(T_gripper_base, T_cam_gripper, T_target_cam):
     plot_frame(T_gripper_base, "Gripper")
     
     # Plot Camera Frame
-    # T_cam_base = T_gripper_base * T_cam_gripper
     T_cam_base = T_gripper_base @ T_cam_gripper
     plot_frame(T_cam_base, "Camera")
     
     # Plot Target (Charuco) Frame
-    # T_target_base = T_cam_base * T_target_cam
     T_target_base = T_cam_base @ T_target_cam
     plot_frame(T_target_base, "Charuco")
     
@@ -208,45 +94,91 @@ def plot_verification(T_gripper_base, T_cam_gripper, T_target_cam):
     plt.legend(['X', 'Y', 'Z'])
     plt.show(block=True)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Verify Hand-Eye Calibration by Aligning with Charuco Board"
-    )
-    parser.add_argument("--host", default="172.16.0.2", help="Robot FCI IP address")
-    parser.add_argument("--calibration", default="data/hand-eye-calibration-output/calibration_result.json",
-                        help="Path to calibration result")
-    parser.add_argument("--offset", type=float, default=0.06,
-                        help="Distance from board in meters (default: 0.06)")
-    args = parser.parse_args()
 
-    print("=" * 70)
-    print("Franka Hand-Eye Calibration - Verification")
-    print("=" * 70)
+def move_to_board_position(
+    robot: RobotController,
+    T_gripper_base_current: np.ndarray,
+    T_cam_gripper: np.ndarray,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    offset: float,
+    target_point: list,
+    position_name: str = "target"
+):
+    """
+    Move robot to a position relative to the charuco board.
     
-    # Warning message
-    print("\n⚠️  WARNING: This script will move the robot!")
-    print("\n📋 Before proceeding, you should:")
-    print("   1. Verify the calibration visually with:")
-    print("      python scripts/compute_calibration.py --plot")
-    print("   2. Ensure the charuco board is visible to the camera")
-    print("   3. Ensure the workspace is clear and safe for robot motion")
-    print("   4. Have the emergency stop readily accessible")
-    print(f"\nThis script will move the robot to align the end effector {args.offset}m")
-    print("above the detected charuco board, tracing its complete perimeter:")
-    print("Center → Top-Left → Top-Right → Bottom-Right → Bottom-Left → Top-Left")
-    print("\n" + "=" * 70)
+    Parameters
+    ----------
+    robot : RobotController
+        Robot controller instance.
+    T_gripper_base_current : np.ndarray
+        Current gripper pose.
+    T_cam_gripper : np.ndarray
+        Camera-to-gripper calibration.
+    rvec : np.ndarray
+        Board rotation vector.
+    tvec : np.ndarray
+        Board translation vector.
+    offset : float
+        Distance offset from board.
+    target_point : list
+        Target point in board frame [x, y, z].
+    position_name : str
+        Name for logging.
+    """
+    T_gripper_base_desired = compute_alignment_pose(
+        T_gripper_base_current, T_cam_gripper, rvec, tvec, offset, target_point
+    )
     
-    response = input("\n➤ Press ENTER to continue or Ctrl+C to abort: ")
+    translation = T_gripper_base_desired[:3, 3].tolist()
+    quaternion = R.from_matrix(T_gripper_base_desired[:3, :3]).as_quat().tolist()
     
+    print(f"🤖 Moving to {position_name}...")
+    robot.move_cartesian(translation, quaternion)
+    print(f"✓ Reached {position_name}")
+
+
+def run_verification(
+    host: str = "172.16.0.2",
+    calibration_path: str = "data/hand-eye-calibration-output/calibration_result.json",
+    offset: float = 0.06,
+    board_params_path: str = "config/calibration_board_parameters.yaml",
+    show_plot: bool = True,
+    tour_corners: bool = True
+) -> bool:
+    """
+    Run the verification procedure.
+    
+    Parameters
+    ----------
+    host : str
+        Robot FCI IP address.
+    calibration_path : str
+        Path to calibration result JSON.
+    offset : float
+        Distance offset from board in meters.
+    board_params_path : str
+        Path to board parameters YAML.
+    show_plot : bool
+        Whether to show preview plot.
+    tour_corners : bool
+        Whether to tour all corners.
+    
+    Returns
+    -------
+    bool
+        True if verification completed successfully.
+    """
     # Load calibration
-    calib_path = Path(args.calibration)
+    calib_path = Path(calibration_path)
     if not calib_path.exists():
         print(f"\n❌ ERROR: Calibration file not found: {calib_path}")
         print("   Run: python scripts/compute_calibration.py")
-        return 1
+        return False
     
     print(f"\n✓ Loading calibration from {calib_path}")
-    T_cam_gripper = load_calibration(calib_path)
+    T_cam_gripper = load_calibration_result(calib_path)
     
     # Initialize camera
     print("✓ Initializing RealSense camera...")
@@ -256,213 +188,189 @@ def main():
         print("✓ Camera initialized")
     except Exception as e:
         print(f"❌ ERROR: Failed to initialize camera: {e}")
-        return 1
+        return False
     
     # Initialize Charuco detector
     print("✓ Loading Charuco board parameters...")
     try:
-        detector = CharucoDetector("config/calibration_board_parameters.yaml")
+        detector = CharucoDetector(board_params_path)
         print("✓ Charuco detector initialized")
     except Exception as e:
         print(f"❌ ERROR: Failed to load Charuco parameters: {e}")
         camera.stop()
-        return 1
+        return False
     
-    # Connect to robot
-    print(f"✓ Connecting to robot at {args.host}...")
+    # Connect to robot using RobotController
+    print(f"✓ Connecting to robot at {host}...")
     try:
-        robot = Robot(args.host)
-        robot.recover_from_errors()
-        robot.relative_dynamics_factor = 0.1  # Slow and safe
-        
+        robot = RobotController(host, dynamics_factor=0.1)
         print("✓ Robot connected")
-        
-        # Initialize gripper
-        gripper = Gripper(args.host)
-        print("✓ Gripper initialized")
         
         # Move to Home Pose
         print("🤖 Moving to home pose...")
-        robot.move(JointMotion([0.0, 0.0, 0.0, -2.2, 0.0, 2.2, 0.7]))
+        robot.go_home()
         print("✓ Reached home pose")
         
         # Home and close gripper
         print("🏠 Homing gripper...")
-        gripper.homing()
+        robot.home_gripper()
         print("✓ Gripper homed")
         
         print("🤏 Closing gripper...")
-        gripper.move(0, 0.1)  # width=0 (closed), speed=0.1
+        robot.close_gripper()
         print("✓ Gripper closed")
         
     except Exception as e:
         print(f"❌ ERROR: Failed to connect to robot: {e}")
         camera.stop()
-        return 1
+        return False
     
     try:
-        # Get current robot state
+        # Detect charuco board
         print("\n📷 Detecting charuco board from current position...")
-        time.sleep(1.0) # Wait for camera/robot to stabilize
+        time.sleep(1.0)
         frame = camera.get_frame()
         if frame is None:
             print("❌ ERROR: Failed to capture frame")
-            return 1
+            return False
         
-        valid, rvec, tvec = detector.detect(frame, K, D)
+        valid, rvec, tvec, _ = detector.detect(frame, K, D)
         
         if not valid:
             print("❌ ERROR: Charuco board not detected!")
             print("   Make sure the board is visible in the camera view.")
-            return 1
+            return False
         
         print("✓ Charuco board detected")
         print(f"   Position in camera frame: {tvec.flatten()}")
         
-        # Get current gripper pose
-        state = robot.state
-        O_T_EE_affine = state.O_T_EE
-        O_T_EE_matrix_remote = O_T_EE_affine.matrix
-        
-        T_gripper_base_current = np.zeros((4, 4))
-        for r in range(4):
-            row_remote = O_T_EE_matrix_remote[r]
-            for c in range(4):
-                T_gripper_base_current[r, c] = float(row_remote[c])
-        
+        # Get current gripper pose using RobotController
+        robot_state = robot.get_state()
+        T_gripper_base_current = robot_state['O_T_EE']
         print("✓ Current gripper pose obtained")
         
-        # Get board dimensions for center calculation
-        board_width, board_height = detector.get_board_dimensions()
-        center_point = [board_width / 2, board_height / 2, 0]
+        # Get board center
+        center_point = detector.get_board_center()
+        board_width, board_height = detector.board_dimensions
         
-        # Compute desired pose (center of board)
-        print(f"\n🧮 Computing alignment pose at board center ({args.offset}m offset)...")
+        print(f"\n🧮 Computing alignment pose at board center ({offset}m offset)...")
         print(f"   Board dimensions: {board_width:.3f}m x {board_height:.3f}m")
         print(f"   Center point in board frame: {center_point}")
-        T_gripper_base_desired = compute_alignment_pose(
-            T_gripper_base_current, T_cam_gripper, rvec, tvec, args.offset, center_point
-        )
         
-        # Convert to lists for RPyC/pybind11 compatibility
-        # pybind11 on the server side should automatically convert these lists 
-        # to the required numpy arrays
-        translation_list = T_gripper_base_desired[:3, 3].tolist()
-        rotation_matrix = T_gripper_base_desired[:3, :3]
-        quaternion_list = R.from_matrix(rotation_matrix).as_quat().tolist() # [x, y, z, w]
-        
-        print("✓ Target pose computed")
-        print("\nDesired gripper position (base frame):")
-        print(f"   xyz: {translation_list}")
-        print(f"   quat (xyzw): {quaternion_list}")
-        
-        # Show preview plot of planned alignment
-        print("\n📊 Displaying preview of center alignment...")
-        print("   (Close the plot window to continue)")
-        
-        # Calculate frames for preview
-        R_target_cam_initial, _ = cv2.Rodrigues(rvec)
-        T_target_cam_initial = np.eye(4)
-        T_target_cam_initial[:3, :3] = R_target_cam_initial
-        T_target_cam_initial[:3, 3] = tvec.flatten()
-        
-        T_cam_base_initial = T_gripper_base_current @ T_cam_gripper
-        T_target_base = T_cam_base_initial @ T_target_cam_initial
-        
-        # For preview, use the TARGET gripper pose we computed
-        T_gripper_base_preview = T_gripper_base_desired
-        T_cam_base_preview = T_gripper_base_preview @ T_cam_gripper
-        T_target_cam_preview = np.linalg.inv(T_cam_base_preview) @ T_target_base
-        
-        plot_verification(T_gripper_base_preview, T_cam_gripper, T_target_cam_preview)
-        
-        # Confirmation after viewing plot
-        print("\n" + "=" * 70)
-        print("The robot will visit:")
-        print("  1. Center of the board")
-        print("  2. All 4 corners (Top-Left → Top-Right → Bottom-Right → Bottom-Left → Top-Left)")
-        print("     This traces all 4 edges of the board!")
-        response = input("\n➤ Proceed with corner tour? Press ENTER to continue or Ctrl+C to abort: ")
-        
-        # Execute absolute motion to center
-        print("\n🤖 Moving robot to board center...")
-        target_affine = Affine(translation_list, quaternion_list)
-        motion = CartesianMotion(target_affine, ReferenceType.Absolute, 0.5)
-        robot.move(motion)
-        
-        print("✓ Reached board center!")
-        
-        print("\n" + "=" * 70)
-        print("✅ Center alignment complete!")
-        print("=" * 70)
-        
-        # Now visit the 4 corners (and back to first to complete the circuit)
-        print("\n🎯 Now visiting the 4 corners of the charuco board...")
-        board_width, board_height = detector.get_board_dimensions()
-        corners = get_board_corners(board_width, board_height)
-        # Add first corner again at the end to complete the circuit
-        corners.append(corners[0])
-        corner_names = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left", "Top-Left (return)"]
-        
-        for i, (corner, corner_name) in enumerate(zip(corners, corner_names)):
-            print(f"\n--- Corner {i+1}/5: {corner_name} ---")
-            print(f"   Position in board frame: {corner}")
-            
-            # Compute alignment pose for this corner
-            T_gripper_base_corner = compute_alignment_pose(
-                T_gripper_base_current, T_cam_gripper, rvec, tvec, args.offset, corner
+        # Show preview plot
+        if show_plot:
+            T_gripper_base_desired = compute_alignment_pose(
+                T_gripper_base_current, T_cam_gripper, rvec, tvec, offset, center_point
             )
             
-            # Convert to lists for RPyC
-            translation_corner = T_gripper_base_corner[:3, 3].tolist()
-            rotation_corner = T_gripper_base_corner[:3, :3]
-            quaternion_corner = R.from_matrix(rotation_corner).as_quat().tolist()
+            R_target_cam, _ = cv2.Rodrigues(rvec)
+            T_target_cam = np.eye(4)
+            T_target_cam[:3, :3] = R_target_cam
+            T_target_cam[:3, 3] = tvec.flatten()
             
-            print(f"   Target gripper position: {translation_corner}")
+            T_cam_base = T_gripper_base_current @ T_cam_gripper
+            T_target_base = T_cam_base @ T_target_cam
             
-            # Move to corner
-            print(f"🤖 Moving to {corner_name} corner...")
-            target_affine_corner = Affine(translation_corner, quaternion_corner)
-            motion_corner = CartesianMotion(target_affine_corner, ReferenceType.Absolute, 1.0)
-            robot.move(motion_corner)
-            print(f"✓ Reached {corner_name} corner")
+            T_cam_base_preview = T_gripper_base_desired @ T_cam_gripper
+            T_target_cam_preview = np.linalg.inv(T_cam_base_preview) @ T_target_base
             
-            # Small delay between corners
-            time.sleep(0.3)
+            print("\n📊 Displaying preview of center alignment...")
+            print("   (Close the plot window to continue)")
+            plot_verification(T_gripper_base_desired, T_cam_gripper, T_target_cam_preview)
         
-        print("\n" + "=" * 70)
-        print("✅ SUCCESS: Complete tour finished!")
-        print("=" * 70)
-        print("\nThe robot has traced the entire perimeter of the charuco board:")
-        print("  ✓ Visited center")
-        print("  ✓ Traced all 4 edges (top → right → bottom → left)")
-        print(f"  ✓ Maintained {args.offset}m offset from board surface")
-        print("\nIf all positions aligned correctly, your hand-eye calibration is accurate!")
+        # Move to center
+        move_to_board_position(
+            robot, T_gripper_base_current, T_cam_gripper, rvec, tvec,
+            offset, center_point, "board center"
+        )
         
-        # Return to home position
+        print("\n✅ Center alignment complete!")
+        
+        # Tour corners if requested
+        if tour_corners:
+            print("\n🎯 Now visiting the 4 corners of the charuco board...")
+            corners = detector.get_board_corners()
+            corners.append(corners[0])  # Return to first corner
+            corner_names = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left", "Top-Left (return)"]
+            
+            for i, (corner, corner_name) in enumerate(zip(corners, corner_names)):
+                print(f"\n--- Corner {i+1}/5: {corner_name} ---")
+                move_to_board_position(
+                    robot, T_gripper_base_current, T_cam_gripper, rvec, tvec,
+                    offset, corner, f"{corner_name} corner"
+                )
+                time.sleep(0.3)
+            
+            print("\n✅ Corner tour complete!")
+        
+        # Return to home
         print("\n🏠 Returning to home position...")
-        robot.move(JointMotion([0.0, 0.0, 0.0, -2.2, 0.0, 2.2, 0.7]))
-        gripper.homing()
+        robot.go_home()
+        robot.home_gripper()
         print("✓ Returned to home position")
         
-        print("\n" + "=" * 70)
-        print("🎉 Verification complete!")
-        print("=" * 70)
-        
-        return 0
+        return True
         
     except KeyboardInterrupt:
         print("\n\n❌ Aborted by user")
-        return 1
+        return False
     except Exception as e:
         print(f"\n❌ ERROR: {e}")
         import traceback
         traceback.print_exc()
-        return 1
+        return False
     finally:
         camera.stop()
         print("\n✓ Camera stopped")
 
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Verify Hand-Eye Calibration by Aligning with Charuco Board"
+    )
+    parser.add_argument("--host", default="172.16.0.2", help="Robot FCI IP address")
+    parser.add_argument("--calibration", default="data/hand-eye-calibration-output/calibration_result.json",
+                        help="Path to calibration result")
+    parser.add_argument("--offset", type=float, default=0.06,
+                        help="Distance from board in meters (default: 0.06)")
+    parser.add_argument("--no-plot", action="store_true", help="Skip preview plot")
+    parser.add_argument("--no-tour", action="store_true", help="Skip corner tour")
+    args = parser.parse_args()
+
+    print("=" * 70)
+    print("Franka Hand-Eye Calibration - Verification")
+    print("=" * 70)
+    
+    print("\n⚠️  WARNING: This script will move the robot!")
+    print("\n📋 Before proceeding:")
+    print("   1. Ensure the charuco board is visible to the camera")
+    print("   2. Ensure the workspace is clear and safe")
+    print("   3. Have the emergency stop readily accessible")
+    print(f"\nThe robot will align the end effector {args.offset}m above the board.")
+    print("\n" + "=" * 70)
+    
+    try:
+        input("\n➤ Press ENTER to continue or Ctrl+C to abort: ")
+    except KeyboardInterrupt:
+        print("\n\nAborted.")
+        return 1
+    
+    success = run_verification(
+        host=args.host,
+        calibration_path=args.calibration,
+        offset=args.offset,
+        show_plot=not args.no_plot,
+        tour_corners=not args.no_tour
+    )
+    
+    if success:
+        print("\n" + "=" * 70)
+        print("🎉 Verification complete!")
+        print("=" * 70)
+        return 0
+    else:
+        return 1
+
+
 if __name__ == "__main__":
     exit(main())
-

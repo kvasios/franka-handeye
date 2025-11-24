@@ -1,85 +1,53 @@
+#!/usr/bin/env python3
+"""
+Franka Hand-Eye Calibration - Compute Calibration Script
+
+Computes hand-eye calibration from captured data.
+Can be run standalone or imported as a module.
+
+Usage:
+    python scripts/compute_calibration.py --data data/captured-data --plot
+"""
+
+import sys
 import argparse
-import json
 import numpy as np
 import cv2
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
-def load_captured_data(data_dir):
-    data_dir = Path(data_dir)
-    pose_dirs = sorted([d for d in data_dir.iterdir() if d.is_dir() and d.name.startswith("pose_")])
-    
-    R_gripper2base = []
-    t_gripper2base = []
-    R_target2cam = []
-    t_target2cam = []
-    
-    valid_poses = 0
-    
-    for p_dir in pose_dirs:
-        json_path = p_dir / "data.json"
-        if not json_path.exists():
-            continue
-            
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-            
-        if not data.get("charuco_detected", False):
-            print(f"Skipping {p_dir.name}: Charuco not detected.")
-            continue
-            
-        # Extract Robot Pose (T_gripper2base = O_T_EE from Franka)
-        # O_T_EE is stored as 16-element row-major flattened matrix
-        O_T_EE = np.array(data["O_T_EE"])
-        
-        # Reshape from row-major (C-order) flattened array
-        T_g2b = O_T_EE.reshape(4, 4)
-        
-        # Verify it's a valid transformation matrix
-        if not np.allclose(T_g2b[3, :], [0, 0, 0, 1]):
-            print(f"Warning: {p_dir.name} has invalid homogeneous row")
-            continue
+# Add parent directory to path for standalone execution
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-        R_g2b = T_g2b[:3, :3]
-        t_g2b = T_g2b[:3, 3]
-        
-        # Extract Target Pose from OpenCV solvePnP
-        # OpenCV's solvePnP gives us the pose of the target frame in the camera frame
-        # rvec, tvec define the transformation FROM target frame TO camera frame
-        # This is what cv2.calibrateHandEye expects as R_target2cam, t_target2cam
-        rvec = np.array(data["T_cam_target_rvec"]).flatten()
-        tvec = np.array(data["T_cam_target_tvec"]).flatten()
-        
-        R_t2c, _ = cv2.Rodrigues(rvec)
-        t_t2c = tvec
-        
-        # Debug output for first pose
-        if valid_poses == 0:
-            print("\n=== Debug First Pose ===")
-            print(f"O_T_EE shape: {O_T_EE.shape}")
-            print(f"T_gripper2base:\n{T_g2b}")
-            print(f"Gripper translation: {t_g2b}")
-            print(f"rvec: {rvec}")
-            print(f"tvec: {tvec}")
-            print(f"R_target2cam:\n{R_t2c}")
-            print(f"Det(R_g2b): {np.linalg.det(R_g2b):.6f}")
-            print(f"Det(R_t2c): {np.linalg.det(R_t2c):.6f}")
-            print("========================\n")
-        
-        R_gripper2base.append(R_g2b)
-        t_gripper2base.append(t_g2b)
-        R_target2cam.append(R_t2c)
-        t_target2cam.append(t_t2c)
-        
-        valid_poses += 1
+from franka_handeye import (
+    load_captured_data,
+    compute_hand_eye_calibration,
+    compute_consistency_metrics,
+    save_calibration_result,
+)
 
-    print(f"Loaded {valid_poses} valid poses for calibration.")
-    return R_gripper2base, t_gripper2base, R_target2cam, t_target2cam
 
 def plot_frames(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
-    fig = plt.figure()
+    """
+    Plot 3D visualization of coordinate frames.
+    
+    Parameters
+    ----------
+    R_g2b : list
+        Gripper-to-base rotation matrices.
+    t_g2b : list
+        Gripper-to-base translations.
+    R_t2c : list
+        Target-to-camera rotation matrices.
+    t_t2c : list
+        Target-to-camera translations.
+    T_cam2gripper : np.ndarray
+        4x4 camera-to-gripper transformation.
+    """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    
+    fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     
     def plot_frame(R, t, label, scale=0.1):
@@ -93,14 +61,12 @@ def plot_frames(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
     plot_frame(np.eye(3), np.zeros(3), "Base")
     
     # Plot Last Pose Frames
-    # T_gripper2base
     last_idx = -1
     R_last_g2b = R_g2b[last_idx]
     t_last_g2b = t_g2b[last_idx]
     plot_frame(R_last_g2b, t_last_g2b, "Gripper")
     
     # Calculate Camera Frame in Base
-    # T_cam2base = T_gripper2base * T_cam2gripper
     T_g2b = np.eye(4)
     T_g2b[:3, :3] = R_last_g2b
     T_g2b[:3, 3] = t_last_g2b
@@ -109,7 +75,6 @@ def plot_frames(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
     plot_frame(T_c2b[:3, :3], T_c2b[:3, 3], "Camera")
     
     # Calculate Target (Charuco) Frame in Base
-    # T_target2base = T_cam2base * T_target2cam
     R_last_t2c = R_t2c[last_idx]
     t_last_t2c = t_t2c[last_idx]
     
@@ -117,18 +82,13 @@ def plot_frames(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
     T_t2c[:3, :3] = R_last_t2c
     T_t2c[:3, 3] = t_last_t2c
     
-    T_t2b = T_c2b @ T_t2c # Note: T_target2cam is pose of target IN camera frame -> T_c2b * T_t2c transforms target point to base? No.
-    # T_target2cam means transformation FROM target TO camera.
-    # So Point_cam = T_target2cam * Point_target
-    # Point_base = T_cam2base * Point_cam = T_cam2base * T_target2cam * Point_target
-    # So T_target2base = T_cam2base * T_target2cam
-    # Correct.
-    
+    T_t2b = T_c2b @ T_t2c
     plot_frame(T_t2b[:3, :3], T_t2b[:3, 3], "Charuco")
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
+    
     # Auto scale
     all_points = np.vstack([np.zeros(3), t_last_g2b, T_c2b[:3, 3], T_t2b[:3, 3]])
     min_xyz = np.min(all_points, axis=0)
@@ -140,76 +100,46 @@ def plot_frames(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
     plt.title("Frames Visualization (Last Pose)")
     plt.show()
 
-def compute_error_metrics(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper):
-    # Error metric:
-    # The transform from Base to Target (Charuco) should be constant across all poses.
-    # T_target2base_i = T_gripper2base_i * T_cam2gripper * T_target2cam_i
-    
-    target_positions = []
-    target_orientations = [] # Quaternions
-    
-    for i in range(len(R_g2b)):
-        T_g2b = np.eye(4)
-        T_g2b[:3, :3] = R_g2b[i]
-        T_g2b[:3, 3] = t_g2b[i].flatten()
-        
-        T_t2c = np.eye(4)
-        T_t2c[:3, :3] = R_t2c[i]
-        T_t2c[:3, 3] = t_t2c[i].flatten() # Note: OpenCV returns tvec as column, flatten ensures consistent shape
-        
-        # T_target2base = T_gripper2base * T_cam2gripper * T_target2cam ? 
-        # Wait. T_target2cam usually means "Pose of Target in Camera Frame". 
-        # So P_cam = T_target2cam * P_target.
-        # P_gripper = T_cam2gripper * P_cam
-        # P_base = T_gripper2base * P_gripper
-        # So P_base = T_gripper2base * T_cam2gripper * T_target2cam * P_target
-        # Yes.
-        
-        T_t2b = T_g2b @ T_cam2gripper @ T_t2c
-        
-        target_positions.append(T_t2b[:3, 3])
-        target_orientations.append(R.from_matrix(T_t2b[:3, :3]).as_quat())
 
-    target_positions = np.array(target_positions)
-    mean_pos = np.mean(target_positions, axis=0)
-    pos_errors = np.linalg.norm(target_positions - mean_pos, axis=1)
+def run_calibration(
+    data_dir: str = "data/captured-data",
+    output_dir: str = "data/hand-eye-calibration-output",
+    show_plot: bool = False,
+    method: int = cv2.CALIB_HAND_EYE_DANIILIDIS
+) -> dict | None:
+    """
+    Run the complete calibration pipeline.
     
-    # Orientation error (approximate angle difference)
-    # Calculate mean orientation? A bit complex for quats.
-    # Let's just take the first one as reference or mean if small dispersion.
-    # Pairwise difference from mean position is good enough for now.
+    Parameters
+    ----------
+    data_dir : str
+        Directory containing captured data.
+    output_dir : str
+        Directory to save calibration result.
+    show_plot : bool
+        Whether to show 3D visualization.
+    method : int
+        OpenCV calibration method.
     
-    print("\n--- Repeatability / Consistency Metrics ---")
-    print(f"Mean Target Position (Base Frame): {mean_pos}")
-    print(f"Position Error (Std Dev): {np.std(pos_errors):.6f} m")
-    print(f"Max Position Error: {np.max(pos_errors):.6f} m")
+    Returns
+    -------
+    dict or None
+        Calibration result dictionary, or None if failed.
+    """
+    # Load data
+    R_g2b, t_g2b, R_t2c, t_t2c = load_captured_data(data_dir)
     
-    # Angular error logic could be added here
-    
-    return np.mean(pos_errors), np.std(pos_errors)
-
-def main():
-    parser = argparse.ArgumentParser(description="Compute Hand-Eye Calibration")
-    parser.add_argument("--data", default="data/captured-data", help="Directory with captured data")
-    parser.add_argument("--plot", action="store_true", help="Show 3D plot of frames")
-    args = parser.parse_args()
-
-    R_g2b, t_g2b, R_t2c, t_t2c = load_captured_data(args.data)
-
     if len(R_g2b) < 3:
         print("Error: Need at least 3 poses for calibration.")
-        return
-
-    print("Running calibration using DANIILIDIS method...")
+        return None
     
-    R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
-        R_gripper2base=R_g2b,
-        t_gripper2base=t_g2b,
-        R_target2cam=R_t2c,
-        t_target2cam=t_t2c,
-        method=cv2.CALIB_HAND_EYE_DANIILIDIS
+    print(f"Running calibration using DANIILIDIS method...")
+    
+    # Compute calibration
+    R_cam2gripper, t_cam2gripper = compute_hand_eye_calibration(
+        R_g2b, t_g2b, R_t2c, t_t2c, method=method
     )
-
+    
     print("\nCalibration Result (T_cam_gripper):")
     print("Rotation Matrix (R_cam2gripper):")
     print(R_cam2gripper)
@@ -225,32 +155,55 @@ def main():
     print(T_cam2gripper)
     
     # Convert to Quaternion
-    quat = R.from_matrix(R_cam2gripper).as_quat() # [x, y, z, w]
+    quat = R.from_matrix(R_cam2gripper).as_quat()
     print("\nQuaternion [x, y, z, w]:")
     print(quat)
     
     # Compute Consistency
-    mean_err, std_err = compute_error_metrics(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper)
-
-    # Save result
-    result = {
-        "T_cam_gripper": T_cam2gripper.tolist(),
-        "xyz": t_cam2gripper.flatten().tolist(),
-        "quaternion_xyzw": quat.tolist(),
-        "consistency_error_mean": float(mean_err),
-        "consistency_error_std": float(std_err)
-    }
+    mean_err, std_err = compute_consistency_metrics(
+        R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper
+    )
     
-    output_dir = Path("data/hand-eye-calibration-output")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "calibration_result.json"
-
-    with open(output_path, 'w') as f:
-        json.dump(result, f, indent=4)
+    print("\n--- Repeatability / Consistency Metrics ---")
+    print(f"Position Error (Mean): {mean_err:.6f} m")
+    print(f"Position Error (Std Dev): {std_err:.6f} m")
+    
+    # Save result
+    output_path = Path(output_dir) / "calibration_result.json"
+    result = save_calibration_result(
+        output_path, R_cam2gripper, t_cam2gripper, mean_err, std_err
+    )
     print(f"\nSaved result to {output_path}")
-
-    if args.plot:
+    
+    if show_plot:
         plot_frames(R_g2b, t_g2b, R_t2c, t_t2c, T_cam2gripper)
+    
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Compute Hand-Eye Calibration")
+    parser.add_argument("--data", default="data/captured-data", help="Directory with captured data")
+    parser.add_argument("--output", default="data/hand-eye-calibration-output", help="Output directory")
+    parser.add_argument("--plot", action="store_true", help="Show 3D plot of frames")
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("Franka Hand-Eye Calibration - Compute")
+    print("=" * 60)
+    
+    result = run_calibration(args.data, args.output, args.plot)
+    
+    if result:
+        print("\n" + "=" * 60)
+        print("SUCCESS: Calibration complete!")
+        print("=" * 60)
+        print("\nNext step: Verify calibration with:")
+        print("  python scripts/verify_calibration.py")
+        return 0
+    else:
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    exit(main())
