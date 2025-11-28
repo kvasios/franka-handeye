@@ -1075,16 +1075,17 @@ def on_viewport_resize():
     
     # Update capture tab buttons and progress bar - make them responsive
     btn_area_width = right_width - 40  # Account for padding
+    
     if dpg.does_item_exist("capture_progress"):
         dpg.configure_item("capture_progress", width=btn_area_width)
     if dpg.does_item_exist("btn_auto_run"):
-        dpg.configure_item("btn_auto_run", width=int(btn_area_width * 0.72))
+        dpg.configure_item("btn_auto_run", width=int(btn_area_width * 0.70))
     if dpg.does_item_exist("btn_stop"):
-        dpg.configure_item("btn_stop", width=int(btn_area_width * 0.22))
+        dpg.configure_item("btn_stop", width=int(btn_area_width * 0.26))
     if dpg.does_item_exist("btn_capture"):
-        dpg.configure_item("btn_capture", width=int((btn_area_width - 16) * 0.5))
+        dpg.configure_item("btn_capture", width=int((btn_area_width - 10) * 0.5))
     if dpg.does_item_exist("btn_clear"):
-        dpg.configure_item("btn_clear", width=int((btn_area_width - 16) * 0.5))
+        dpg.configure_item("btn_clear", width=int((btn_area_width - 10) * 0.5))
         
     # Resize other full-width elements
     if dpg.does_item_exist("btn_go_home"):
@@ -1096,9 +1097,10 @@ def on_viewport_resize():
     if dpg.does_item_exist("verify_status_window"):
         dpg.configure_item("verify_status_window", width=btn_area_width)
     if dpg.does_item_exist("btn_check_frames"):
-        dpg.configure_item("btn_check_frames", width=int((btn_area_width - 16) * 0.5))
+        dpg.configure_item("btn_check_frames", width=int((btn_area_width - 10) * 0.5))
     if dpg.does_item_exist("btn_visit_corners"):
-        dpg.configure_item("btn_visit_corners", width=int((btn_area_width - 16) * 0.5))
+        dpg.configure_item("btn_visit_corners", width=int((btn_area_width - 10) * 0.5))
+        
         
     # Update text wrapping for description texts
     if dpg.does_item_exist("calib_desc_text"):
@@ -1114,7 +1116,7 @@ def create_ui():
     # Start with a good default size for HD screens - sized to fit all content without scrolling
     dpg.create_viewport(title='Franka Hand-Eye Calibration', width=1600, height=920)
     dpg.set_viewport_min_width(1400)
-    dpg.set_viewport_min_height(1020)
+    dpg.set_viewport_min_height(1040)
     
     # Setup theme
     ui_state['themes'] = setup_theme()
@@ -1233,12 +1235,12 @@ def create_ui():
                             dpg.add_text("/", color=Theme.TEXT_MUTED)
                             dpg.add_text(str(state.target_captures), tag="target_count")
                         
-                        dpg.add_progress_bar(default_value=0.0, tag="capture_progress", width=360)
+                        dpg.add_progress_bar(default_value=0.0, tag="capture_progress", width=-1)
                         
                         dpg.add_spacer(height=12)
                         
-                        # Capture buttons - use tags for dynamic sizing
-                        with dpg.group(horizontal=True):
+                        # Capture buttons
+                        with dpg.group(horizontal=True, tag="capture_btn_row1"):
                             btn = dpg.add_button(label="AUTO RUN", tag="btn_auto_run", callback=start_auto_capture, width=250, height=44)
                             dpg.bind_item_theme(btn, ui_state['themes']['success'])
                             
@@ -1249,7 +1251,7 @@ def create_ui():
                             
                         dpg.add_spacer(height=10)
 
-                        with dpg.group(horizontal=True):
+                        with dpg.group(horizontal=True, tag="capture_btn_row2"):
                             btn = dpg.add_button(label="CAPTURE", tag="btn_capture", callback=capture_pose, width=175, height=44)
                             dpg.bind_item_theme(btn, ui_state['themes']['accent'])
                             
@@ -1377,7 +1379,7 @@ def create_ui():
                         
                         dpg.add_spacer(height=12)
                         
-                        with dpg.group(horizontal=True):
+                        with dpg.group(horizontal=True, tag="verify_btn_row"):
                             btn_check = dpg.add_button(label="CHECK FRAMES", tag="btn_check_frames", callback=check_frames_visualizer, width=175, height=44)
                             dpg.bind_item_theme(btn_check, ui_state['themes']['accent'])
                             
