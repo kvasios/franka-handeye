@@ -23,6 +23,7 @@ import argparse
 import json
 import shutil
 import threading
+import yaml
 from pathlib import Path
 
 import numpy as np
@@ -206,6 +207,7 @@ class AppState:
         self._camera_init_attempted = False
         self.host = "172.16.0.2"  # Store host for reconnection
         self.robot_error: str | None = None  # Store last robot error
+        self.is_auto_capturing = False  # Flag for auto-capture sequence
     
     def initialize(self, host: str) -> bool:
         """Initialize hardware connections."""
@@ -425,11 +427,12 @@ def go_home():
         log(f"Home error: {e}", "error")
 
 
-def capture_pose():
-    """Capture current pose and save data."""
+
+def _capture_impl(save_to_config=True) -> bool:
+    """Internal implementation of capture logic."""
     if not state.robot or state.last_frame is None:
         log("Cannot capture: Robot not connected or no video", "error")
-        return
+        return False
     
     try:
         robot_state = state.robot.get_state()
@@ -462,21 +465,32 @@ def capture_pose():
         state.captured_poses.append(q)
         state.captured_count += 1
         
-        # Save joint poses config
-        yaml_content = "joint_poses:\n"
-        for pose in state.captured_poses:
-            pose_str = "  - [" + ", ".join([f"{x:.4f}" for x in pose]) + "]\n"
-            yaml_content += pose_str
-        
-        state.poses_config_path.parent.mkdir(exist_ok=True)
-        with open(state.poses_config_path, 'w') as f:
-            f.write(yaml_content)
+        if save_to_config:
+            # Save joint poses config
+            yaml_content = "joint_poses:\n"
+            for pose in state.captured_poses:
+                pose_str = "  - [" + ", ".join([f"{x:.4f}" for x in pose]) + "]\n"
+                yaml_content += pose_str
+            
+            state.poses_config_path.parent.mkdir(exist_ok=True)
+            with open(state.poses_config_path, 'w') as f:
+                f.write(yaml_content)
         
         log(f"Captured pose {pose_idx} {'(ChArUco detected)' if valid else '(No ChArUco)'}", 
             "success" if valid else "warning")
+        return True
         
     except Exception as e:
         log(f"Capture error: {e}", "error")
+        return False
+
+
+def capture_pose(sender=None, app_data=None, user_data=None):
+    """Capture current pose and save data."""
+    if state.is_auto_capturing:
+        return
+    _capture_impl(save_to_config=True)
+
 
 
 def clear_captures():
@@ -490,13 +504,119 @@ def clear_captures():
     log("Cleared all captured data", "info")
 
 
+def _auto_capture_thread(joint_poses):
+    """Thread for auto-capture sequence."""
+    state.is_auto_capturing = True
+    log("Starting auto-capture sequence...", "info")
+    
+    try:
+        # Clear existing captures first
+        if state.output_dir.exists():
+            shutil.rmtree(state.output_dir)
+            state.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        state.captured_count = 0
+        state.captured_poses = []
+        
+        # Update UI safely
+        dpg.set_value("capture_count", "0")
+        dpg.set_value("capture_progress", 0.0)
+        
+        successful_captures = 0
+        
+        for i, pose in enumerate(joint_poses):
+            if not state.is_auto_capturing: # Check for abort
+                log("Auto-capture aborted by user", "warning")
+                break
+                
+            log(f"Moving to pose {i+1}/{len(joint_poses)}...", "info")
+            
+            # Move robot
+            try:
+                state.robot.move_joints(pose)
+                time.sleep(0.5) # Stabilization delay
+            except Exception as e:
+                log(f"Motion error at pose {i+1}: {e}", "error")
+                continue
+            
+            # Capture
+            if _capture_impl(save_to_config=False):
+                successful_captures += 1
+            
+            # Update UI progress
+            dpg.set_value("capture_count", str(state.captured_count))
+            dpg.set_value("capture_progress", state.captured_count / len(joint_poses))
+            
+        if state.is_auto_capturing:
+            log(f"Auto-capture complete: {successful_captures}/{len(joint_poses)} successful", 
+                "success" if successful_captures == len(joint_poses) else "warning")
+            
+    except Exception as e:
+        log(f"Auto-capture error: {e}", "error")
+    finally:
+        state.is_auto_capturing = False
+
+
+def start_auto_capture(sender=None, app_data=None, user_data=None):
+    """Start the auto-capture sequence."""
+    if state.is_auto_capturing:
+        log("Auto-capture is already running", "warning")
+        return
+        
+    if not state.robot:
+        log("Robot not connected", "error")
+        return
+        
+    # Load poses
+    if not state.poses_config_path.exists():
+        log(f"Config file not found: {state.poses_config_path}", "error")
+        return
+        
+    try:
+        with open(state.poses_config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            
+        if not config or 'joint_poses' not in config:
+            log("No joint_poses found in config", "error")
+            return
+            
+        joint_poses = config['joint_poses']
+        
+        if len(joint_poses) < 12:
+            log(f"Insufficient poses: {len(joint_poses)} (need 12+)", "error")
+            return
+            
+        # Start thread
+        threading.Thread(target=_auto_capture_thread, args=(joint_poses,), daemon=True).start()
+        
+    except Exception as e:
+        log(f"Failed to load poses: {e}", "error")
+
+
+def stop_auto_capture(sender=None, app_data=None, user_data=None):
+    """Stop the auto-capture sequence."""
+    if state.is_auto_capturing:
+        state.is_auto_capturing = False
+        log("Stopping auto-capture...", "warning")
+
+
+def _show_calibration_plot_thread(T_g2b, T_cam_gripper, T_t2c):
+    """Thread to show calibration plot."""
+    plot_verification_preview(
+        T_g2b, 
+        T_cam_gripper, 
+        T_t2c,
+        title="Calibration Result (Last Pose)\nClose window to continue"
+    )
+
+
 def run_calibration():
     """Run the calibration computation."""
     try:
         R_g2b, t_g2b, R_t2c, t_t2c = load_captured_data(state.output_dir)
         
-        if len(R_g2b) < 3:
-            log("Need at least 3 valid poses for calibration", "error")
+        if len(R_g2b) < 12:
+            log(f"Need at least 12 valid poses for calibration (found {len(R_g2b)})", "error")
             return
         
         log(f"Running calibration with {len(R_g2b)} poses...", "info")
@@ -520,38 +640,334 @@ def run_calibration():
         
         log(f"Calibration complete! Error: {mean_err*1000:.2f}mm ± {std_err*1000:.2f}mm", "success")
         
+        # Show 3D plot
+        # Use last captured pose for visualization
+        idx = -1
+        T_g2b_last = np.eye(4)
+        T_g2b_last[:3, :3] = R_g2b[idx]
+        T_g2b_last[:3, 3] = t_g2b[idx].flatten()
+        
+        T_t2c_last = np.eye(4)
+        T_t2c_last[:3, :3] = R_t2c[idx]
+        T_t2c_last[:3, 3] = t_t2c[idx].flatten()
+        
+        threading.Thread(
+            target=_show_calibration_plot_thread,
+            args=(T_g2b_last, T_cam2gripper, T_t2c_last),
+            daemon=True
+        ).start()
+        
     except Exception as e:
         log(f"Calibration error: {e}", "error")
 
 
-def verify_calibration():
-    """Move to align with detected charuco board."""
-    if not state.robot or not state.T_cam_gripper is not None:
-        log("Cannot verify: Robot not connected or no calibration", "error")
-        return
-    
-    valid, rvec, tvec = state.current_detection
-    if not valid:
-        log("Cannot verify: ChArUco board not detected", "error")
-        return
-    
+import multiprocessing
+
+def _run_plot_process(T_gripper_base_desired, T_cam_gripper, T_target_cam, queue, title=None):
+    """
+    Process function to run the matplotlib plot.
+    Puts True in queue if proceeding, False if cancelled.
+    """
     try:
-        T_gripper_base = state.robot.get_state()['O_T_EE']
-        center = state.detector.get_board_center() if state.detector else [0, 0, 0]
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D
         
-        T_desired = compute_alignment_pose(
-            T_gripper_base, state.T_cam_gripper, rvec, tvec, 
-            offset_distance=0.06, target_point_in_board=center
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        def plot_frame(T, label, scale=0.1):
+            R_mat = T[:3, :3]
+            t = T[:3, 3]
+            ax.quiver(t[0], t[1], t[2], R_mat[0,0], R_mat[1,0], R_mat[2,0], length=scale, color='r')
+            ax.quiver(t[0], t[1], t[2], R_mat[0,1], R_mat[1,1], R_mat[2,1], length=scale, color='g')
+            ax.quiver(t[0], t[1], t[2], R_mat[0,2], R_mat[1,2], R_mat[2,2], length=scale, color='b')
+            ax.text(t[0], t[1], t[2], label)
+
+        # Plot Base Frame (0,0,0)
+        plot_frame(np.eye(4), "Base", scale=0.2)
+        
+        # Plot Gripper Frame (desired position)
+        plot_frame(T_gripper_base_desired, "Gripper (target)")
+        
+        # Plot Camera Frame
+        T_cam_base = T_gripper_base_desired @ T_cam_gripper
+        plot_frame(T_cam_base, "Camera")
+        
+        # Plot Target (Charuco) Frame
+        T_target_base = T_cam_base @ T_target_cam
+        plot_frame(T_target_base, "Charuco")
+        
+        # Set labels and auto-scale
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
+        
+        # Collect all points to set axes limits
+        points = np.vstack([
+            np.zeros(3), 
+            T_gripper_base_desired[:3, 3], 
+            T_cam_base[:3, 3], 
+            T_target_base[:3, 3]
+        ])
+        
+        center = np.mean(points, axis=0)
+        radius = np.max(np.linalg.norm(points - center, axis=1)) + 0.1
+        
+        ax.set_xlim(center[0] - radius, center[0] + radius)
+        ax.set_ylim(center[1] - radius, center[1] + radius)
+        ax.set_zlim(center[2] - radius, center[2] + radius)
+        
+        if title:
+            plt.title(title)
+        else:
+            plt.title("Verification Preview\nClose window to PROCEED | Press 'q' to CANCEL")
+        
+        # Track if user cancelled
+        cancelled = [False]
+        def on_key(event):
+            if event.key == 'q':
+                cancelled[0] = True
+                plt.close()
+        
+        fig.canvas.mpl_connect('key_press_event', on_key)
+        plt.show(block=True)
+        
+        queue.put(not cancelled[0])
+        
+        # Ensure figure is closed (though plt.show blocks until close usually)
+        try:
+            plt.close(fig)
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"Plotting error: {e}")
+        queue.put(False)
+
+
+def plot_verification_preview(T_gripper_base_desired, T_cam_gripper, T_target_cam, title=None):
+    """
+    Show a matplotlib 3D plot of the planned alignment.
+    Runs in a separate PROCESS to avoid crashing the main GUI loop.
+    """
+    queue = multiprocessing.Queue()
+    p = multiprocessing.Process(
+        target=_run_plot_process, 
+        args=(T_gripper_base_desired, T_cam_gripper, T_target_cam, queue, title)
+    )
+    p.start()
+    p.join()  # Wait for process to finish (window closed)
+    
+    if not queue.empty():
+        return queue.get()
+    return False
+
+
+def move_to_board_position(robot, T_gripper_base_current, T_cam_gripper, rvec, tvec, offset, target_point, position_name):
+    """Move robot to a position relative to the charuco board."""
+    T_gripper_base_desired = compute_alignment_pose(
+        T_gripper_base_current, T_cam_gripper, rvec, tvec, offset, target_point
+    )
+    
+    translation = T_gripper_base_desired[:3, 3].tolist()
+    quaternion = R.from_matrix(T_gripper_base_desired[:3, :3]).as_quat().tolist()
+    
+    log(f"🤖 Moving to {position_name}...", "info")
+    robot.move_cartesian(translation, quaternion, asynchronous=False)
+    log(f"✓ Reached {position_name}", "success")
+
+
+def run_homing_and_detection():
+    """
+    Helper to perform homing and detection sequence.
+    Returns (valid, rvec, tvec)
+    """
+    # Step 1: Validate prerequisites
+    if not state.robot:
+        log("Cannot verify: Robot not connected", "error")
+        return False, None, None
+    
+    # Step 2: Go to home pose
+    log("🤖 Moving to home pose...", "info")
+    state.robot.go_home()
+    log("✓ Reached home pose", "success")
+    
+    # Step 3: Home and close gripper
+    log("🏠 Homing gripper...", "info")
+    state.robot.home_gripper()
+    log("✓ Gripper homed", "success")
+    
+    log("🤏 Closing gripper...", "info")
+    state.robot.close_gripper()
+    log("✓ Gripper closed", "success")
+    
+    # Step 4: Wait and detect charuco board from home position
+    log("📷 Detecting charuco board from home position...", "info")
+    time.sleep(1.0)  # Wait for robot to settle
+    
+    frame = state.camera.get_frame()
+    if frame is None:
+        log("Cannot verify: Failed to capture frame", "error")
+        return False, None, None
+    
+    K, D = state.camera.get_intrinsics_matrix()
+    valid, rvec, tvec, _ = state.detector.detect(frame, K, D)
+    
+    if not valid:
+        log("❌ ChArUco board not detected! Make sure it's visible from home position.", "error")
+        return False, None, None
+    
+    log(f"✓ ChArUco detected at position: {tvec.flatten()}", "success")
+    return True, rvec, tvec
+
+
+def check_frames_visualizer_thread():
+    """
+    Runs the check frames sequence:
+    1. Home robot & gripper
+    2. Detect charuco
+    3. Show plot
+    """
+    try:
+        if state.T_cam_gripper is None:
+            log("Cannot check frames: No calibration loaded", "error")
+            return
+        
+        # Run homing and detection
+        valid, rvec, tvec = run_homing_and_detection()
+        if not valid:
+            return
+            
+        # Get current robot state (should be home)
+        T_gripper_base_current = state.robot.get_state()['O_T_EE']
+        
+        # Compute transforms for visualization
+        R_target_cam, _ = cv2.Rodrigues(rvec)
+        T_target_cam = np.eye(4)
+        T_target_cam[:3, :3] = R_target_cam
+        T_target_cam[:3, 3] = tvec.flatten()
+        
+        log("📊 Showing frame plot...", "info")
+        log("   Close window to finish", "info")
+        
+        # Show plot
+        plot_verification_preview(
+            T_gripper_base_current, 
+            state.T_cam_gripper, 
+            T_target_cam,
+            title="Current Frame Check\nClose window to finish"
         )
         
-        translation = T_desired[:3, 3].tolist()
-        quaternion = R.from_matrix(T_desired[:3, :3]).as_quat().tolist()
+        log("✓ Frame check complete", "success")
+
+    except Exception as e:
+        log(f"Frame check error: {e}", "error")
+        import traceback
+        traceback.print_exc()
+
+
+def verify_visit_corners_thread():
+    """
+    Runs the visit corners sequence:
+    1. Checks for valid detection (from Check Frames step)
+    2. Moves to center
+    3. Tours corners
+    4. Returns home
+    """
+    try:
+        # Validate prerequisites
+        if not state.robot:
+            log("Cannot verify: Robot not connected", "error")
+            return
+        if state.T_cam_gripper is None:
+            log("Cannot verify: No calibration loaded", "error")
+            return
+            
+        offset = 0.06  # 6cm offset from board
         
-        log("Moving to align with board center...", "info")
-        state.robot.move_cartesian(translation, quaternion, asynchronous=True)
+        # Use current detection from state (updated by UI loop or previous check)
+        valid, rvec, tvec = state.current_detection
+        
+        if not valid:
+            log("❌ No valid ChArUco detection!", "error")
+            log("   Please run 'CHECK CURRENT FRAMES' first or ensure board is visible.", "error")
+            return
+
+        # Get current robot state
+        T_gripper_base_current = state.robot.get_state()['O_T_EE']
+        center_point = state.detector.get_board_center()
+        board_width, board_height = state.detector.board_dimensions
+        
+        log(f"🧮 Computing path to board center...", "info")
+        
+        # Move to board center
+        move_to_board_position(
+            state.robot, T_gripper_base_current, state.T_cam_gripper, 
+            rvec, tvec, offset, center_point, "board center"
+        )
+        log("✅ Center alignment complete!", "success")
+        
+        # Tour corners
+        log("🎯 Now visiting the 4 corners of the charuco board...", "info")
+        corners = state.detector.get_board_corners()
+        corners.append(corners[0])  # Return to first corner
+        corner_names = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left", "Top-Left (return)"]
+        
+        # We need to update T_gripper_base_current after moving to center
+        # Actually, move_to_board_position moves the robot, so get_state() would be updated
+        # BUT compute_alignment_pose uses the detection relative to the STARTING pose
+        # If we move, the detection (rvec, tvec) is relative to the Camera at the STARTING pose.
+        # So we must use the ORIGINAL T_gripper_base_current (where detection happened)
+        # combined with the ORIGINAL rvec/tvec.
+        
+        # Wait, if the robot moved, the detection in 'state.current_detection' might be from the NEW position?
+        # state.current_detection is updated by update_ui -> get_video_frame loop.
+        # If the robot is at Center, we might lose detection (too close?).
+        # But we should use the detection we started with.
+        
+        # CRITICAL: state.current_detection is live. 
+        # If we trust the user ran "Check Frames" (went Home) and we are still at Home, 
+        # then state.current_detection corresponds to Home.
+        
+        # Let's grab the detection snapshot at the start of this function
+        start_rvec = rvec
+        start_tvec = tvec
+        start_T_gripper_base = T_gripper_base_current # Robot is presumably at Home
+        
+        for i, (corner, corner_name) in enumerate(zip(corners, corner_names)):
+            log(f"--- Corner {i+1}/5: {corner_name} ---", "info")
+            move_to_board_position(
+                state.robot, start_T_gripper_base, state.T_cam_gripper,
+                start_rvec, start_tvec, offset, corner, f"{corner_name} corner"
+            )
+            time.sleep(0.3)
+        
+        log("✅ Corner tour complete!", "success")
+        
+        # Return to home
+        log("🏠 Returning to home position...", "info")
+        state.robot.go_home()
+        state.robot.home_gripper()
+        log("✓ Returned to home position", "success")
+        
+        log("🎉 Verification complete!", "success")
         
     except Exception as e:
-        log(f"Verification error: {e}", "error")
+        log(f"Visit error: {e}", "error")
+        import traceback
+        traceback.print_exc()
+
+
+def check_frames_visualizer():
+    """Start frame checker in a background thread."""
+    thread = threading.Thread(target=check_frames_visualizer_thread, daemon=True)
+    thread.start()
+
+
+def start_visit_corners():
+    """Start corner visit in a background thread."""
+    thread = threading.Thread(target=verify_visit_corners_thread, daemon=True)
+    thread.start()
 
 
 # =============================================================================
@@ -690,6 +1106,17 @@ def create_ui():
                         
                         # Capture buttons
                         with dpg.group(horizontal=True):
+                            btn = dpg.add_button(label="AUTO RUN (FROM CONFIG)", callback=start_auto_capture, width=450, height=50)
+                            dpg.bind_item_theme(btn, ui_state['themes']['success'])
+                            
+                            dpg.add_spacer(width=16)
+                            
+                            btn = dpg.add_button(label="STOP", callback=stop_auto_capture, width=150, height=50)
+                            dpg.bind_item_theme(btn, ui_state['themes']['danger'])
+                            
+                        dpg.add_spacer(height=16)
+
+                        with dpg.group(horizontal=True):
                             btn = dpg.add_button(label="CAPTURE POSE", callback=capture_pose, width=300, height=50)
                             dpg.bind_item_theme(btn, ui_state['themes']['accent'])
                             
@@ -762,7 +1189,7 @@ def create_ui():
                         
                         dpg.add_text(
                             "Compute hand-eye calibration from captured poses.\n"
-                            "Requires at least 3 poses with ChArUco detection.",
+                            "Requires at least 12 poses with ChArUco detection.",
                             color=Theme.TEXT_MUTED, wrap=600
                         )
                         
@@ -803,18 +1230,23 @@ def create_ui():
                         dpg.add_spacer(height=8)
                         
                         dpg.add_text(
-                            "Verify calibration by moving the robot to align\n"
-                            "with the detected ChArUco board.\n\n"
-                            "Requirements:\n"
-                            "• Valid calibration loaded\n"
-                            "• ChArUco board visible in camera",
+                            "Verify calibration by aligning the robot with the ChArUco board.\n\n"
+                            "Functions:\n"
+                            "• CHECK CURRENT FRAMES: Home Robot -> Detect -> Show Plot (No further movement)\n"
+                            "• VISIT CORNERS: Uses detection from 'Check' to Visit Board Center & Corners -> Home",
                             color=Theme.TEXT_MUTED, wrap=600
                         )
                         
                         dpg.add_spacer(height=16)
                         
-                        btn = dpg.add_button(label="ALIGN WITH BOARD", callback=verify_calibration, width=620, height=50)
-                        dpg.bind_item_theme(btn, ui_state['themes']['accent'])
+                        with dpg.group(horizontal=True):
+                            btn_check = dpg.add_button(label="CHECK CURRENT FRAMES", callback=check_frames_visualizer, width=300, height=50)
+                            dpg.bind_item_theme(btn_check, ui_state['themes']['accent'])
+                            
+                            dpg.add_spacer(width=20)
+                            
+                            btn_visit = dpg.add_button(label="VISIT CORNERS", callback=start_visit_corners, width=300, height=50)
+                            dpg.bind_item_theme(btn_visit, ui_state['themes']['accent'])
                         
                         dpg.add_spacer(height=24)
                         dpg.add_separator()

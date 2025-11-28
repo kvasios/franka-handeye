@@ -59,6 +59,30 @@ class RobotController:
         cartesian_acceleration: float = 0.5,
         cartesian_jerk: float = 0.1
     ):
+        # Try to import franky if it wasn't available at module load time
+        global FRANKY_AVAILABLE, FrankyRobot, JointMotion, CartesianMotion, CartesianVelocityMotion, CartesianVelocityStopMotion, Twist, Duration, Reaction, Measure, Affine, ReferenceType, RelativeDynamicsFactor, FrankyGripper
+        
+        if not FRANKY_AVAILABLE:
+            try:
+                from franky import (
+                    Robot as FrankyRobot,
+                    JointMotion,
+                    CartesianMotion,
+                    CartesianVelocityMotion,
+                    CartesianVelocityStopMotion,
+                    Twist,
+                    Duration,
+                    Reaction,
+                    Measure,
+                    Affine,
+                    ReferenceType,
+                    RelativeDynamicsFactor,
+                    Gripper as FrankyGripper,
+                )
+                FRANKY_AVAILABLE = True
+            except ImportError:
+                pass
+
         if not FRANKY_AVAILABLE:
             raise RuntimeError("franky is not installed")
             
@@ -97,8 +121,35 @@ class RobotController:
         self._robot.relative_dynamics_factor = max(0.01, min(1.0, value))
     
     def recover(self):
-        """Recover from errors."""
-        self._robot.recover_from_errors()
+        """
+        Recover from errors.
+        
+        Attempts to call recover_from_errors().
+        If that fails (e.g. connection lost), it re-initializes the robot connection.
+        """
+        try:
+            self._robot.recover_from_errors()
+        except Exception as e:
+            print(f"Recovery failed ({e}), attempting full reconnection...")
+            try:
+                # Store current config
+                current_dynamics = self._robot.relative_dynamics_factor
+                
+                # Re-instantiate robot
+                self._robot = FrankyRobot(self.host)
+                self._robot.recover_from_errors()
+                
+                # Restore config
+                self._robot.relative_dynamics_factor = current_dynamics
+                
+                # Re-initialize gripper if it was used
+                if self._gripper is not None:
+                    self._gripper = FrankyGripper(self.host)
+                    
+                print("Reconnection successful")
+            except Exception as e2:
+                print(f"Reconnection failed: {e2}")
+                raise e2
     
     def get_state(self) -> dict:
         """
