@@ -352,10 +352,11 @@ state = AppState()
 
 ui_state = {
     'video_texture': None,
-    'video_width': 640,
-    'video_height': 360,
+    'video_width': 800,
+    'video_height': 450,
     'themes': {},
     'log_messages': [],
+    'layout': {},  # Will store dynamic layout info
 }
 
 
@@ -390,6 +391,7 @@ def update_camera_texture(frame: np.ndarray):
     if frame is None or ui_state['video_texture'] is None:
         return
     
+    # Resize to texture size (fixed buffer size)
     display_frame = cv2.resize(frame, (ui_state['video_width'], ui_state['video_height']))
     rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
     rgb_frame = np.flipud(rgb_frame)
@@ -1028,10 +1030,91 @@ def create_jog_button(label: str, axis: int, sign: int, width: int = 60, height:
     ui_state['jog_button_metadata'][btn_tag] = (axis, sign)
 
 
+def on_viewport_resize():
+    """Handle viewport resize - update layout dynamically."""
+    vp_width = dpg.get_viewport_client_width()
+    vp_height = dpg.get_viewport_client_height()
+    
+    # Minimum dimensions
+    vp_width = max(vp_width, 1400)
+    vp_height = max(vp_height, 850)
+    
+    # Calculate layout
+    padding = 24
+    gap = 24
+    header_height = 60
+    
+    # Available content area
+    content_width = vp_width - 2 * padding
+    content_height = vp_height - header_height - padding
+    
+    # Two-column layout: 70% Camera, 30% Controls
+    left_width = int(content_width * 0.70)
+    right_width = content_width - left_width - gap
+    
+    # Video sizing - maintain 16:9 aspect ratio, fill available width
+    video_w = left_width - 40
+    video_h = int(video_w * 9 / 16)
+    
+    # Update child window sizes
+    if dpg.does_item_exist("left_column"):
+        dpg.configure_item("left_column", width=left_width)
+    if dpg.does_item_exist("video_image"):
+        dpg.configure_item("video_image", width=video_w, height=video_h)
+    
+    # Robot State and Log are side by side, each gets half width
+    half_width = (left_width - 40) // 2
+    if dpg.does_item_exist("robot_state_window"):
+        dpg.configure_item("robot_state_window", width=half_width)
+    if dpg.does_item_exist("log_window"):
+        dpg.configure_item("log_window", width=half_width)
+        if dpg.does_item_exist("log_text"):
+            dpg.configure_item("log_text", wrap=half_width - 20)
+    if dpg.does_item_exist("right_column"):
+        dpg.configure_item("right_column", width=right_width)
+    
+    # Update capture tab buttons and progress bar - make them responsive
+    btn_area_width = right_width - 40  # Account for padding
+    if dpg.does_item_exist("capture_progress"):
+        dpg.configure_item("capture_progress", width=btn_area_width)
+    if dpg.does_item_exist("btn_auto_run"):
+        dpg.configure_item("btn_auto_run", width=int(btn_area_width * 0.72))
+    if dpg.does_item_exist("btn_stop"):
+        dpg.configure_item("btn_stop", width=int(btn_area_width * 0.22))
+    if dpg.does_item_exist("btn_capture"):
+        dpg.configure_item("btn_capture", width=int((btn_area_width - 16) * 0.5))
+    if dpg.does_item_exist("btn_clear"):
+        dpg.configure_item("btn_clear", width=int((btn_area_width - 16) * 0.5))
+        
+    # Resize other full-width elements
+    if dpg.does_item_exist("btn_go_home"):
+        dpg.configure_item("btn_go_home", width=btn_area_width)
+    if dpg.does_item_exist("btn_run_calib"):
+        dpg.configure_item("btn_run_calib", width=btn_area_width)
+    if dpg.does_item_exist("calib_result_window"):
+        dpg.configure_item("calib_result_window", width=btn_area_width)
+    if dpg.does_item_exist("verify_status_window"):
+        dpg.configure_item("verify_status_window", width=btn_area_width)
+    if dpg.does_item_exist("btn_check_frames"):
+        dpg.configure_item("btn_check_frames", width=int((btn_area_width - 16) * 0.5))
+    if dpg.does_item_exist("btn_visit_corners"):
+        dpg.configure_item("btn_visit_corners", width=int((btn_area_width - 16) * 0.5))
+        
+    # Update text wrapping for description texts
+    if dpg.does_item_exist("calib_desc_text"):
+        dpg.configure_item("calib_desc_text", wrap=btn_area_width)
+    if dpg.does_item_exist("verify_desc_text"):
+        dpg.configure_item("verify_desc_text", wrap=btn_area_width)
+
+
 def create_ui():
     """Create the complete DearPyGui interface."""
     dpg.create_context()
-    dpg.create_viewport(title='Franka Hand-Eye Calibration', width=1400, height=900)
+    
+    # Start with a good default size for HD screens - sized to fit all content without scrolling
+    dpg.create_viewport(title='Franka Hand-Eye Calibration', width=1600, height=920)
+    dpg.set_viewport_min_width(1400)
+    dpg.set_viewport_min_height(1020)
     
     # Setup theme
     ui_state['themes'] = setup_theme()
@@ -1040,7 +1123,7 @@ def create_ui():
     with dpg.font_registry():
         # Try to use a nice font if available, otherwise use default
         default_font = dpg.add_font(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14,
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 15,
         ) if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") else None
         if default_font:
             dpg.bind_font(default_font)
@@ -1054,24 +1137,28 @@ def create_ui():
             format=dpg.mvFormat_Float_rgb
         )
     
+    # Register resize handler
+    with dpg.item_handler_registry(tag="viewport_resize_handler") as handler:
+        dpg.add_item_resize_handler(callback=lambda s, a, u: on_viewport_resize())
+    
     # Main window
-    with dpg.window(label="Main", tag="primary_window", no_title_bar=True, no_move=True):
+    with dpg.window(label="Main", tag="primary_window", no_title_bar=True, no_move=True, no_scrollbar=True):
         
         # ===== HEADER =====
         with dpg.group(horizontal=True):
             dpg.add_text("FRANKA HAND-EYE CALIBRATION", color=Theme.ACCENT_PRIMARY)
-            dpg.add_spacer(width=20)
+            dpg.add_spacer(width=30)
             dpg.add_text("Robot:", color=Theme.TEXT_SECONDARY)
             dpg.add_text("Disconnected", tag="robot_status", color=Theme.DISCONNECTED)
-            dpg.add_spacer(width=8)
+            dpg.add_spacer(width=10)
             reconnect_btn = dpg.add_button(
                 label="Reconnect", 
                 tag="reconnect_btn",
                 callback=reconnect_robot, 
-                width=80, 
-                height=22
+                width=90, 
+                height=24
             )
-            dpg.add_spacer(width=20)
+            dpg.add_spacer(width=30)
             dpg.add_text("Camera:", color=Theme.TEXT_SECONDARY)
             dpg.add_text("Disconnected", tag="camera_status", color=Theme.DISCONNECTED)
         
@@ -1086,12 +1173,12 @@ def create_ui():
         with dpg.group(horizontal=True):
             
             # ===== LEFT COLUMN: Video & Detection =====
-            with dpg.child_window(width=680, height=680, border=False, autosize_x=False):
+            with dpg.child_window(tag="left_column", width=950, height=-1, border=False):
                 dpg.add_text("CAMERA FEED", color=Theme.TEXT_SECONDARY)
                 dpg.add_spacer(height=4)
                 
-                with dpg.child_window(width=660, height=380, border=True):
-                    dpg.add_image(ui_state['video_texture'], width=640, height=360)
+                # Video
+                dpg.add_image(ui_state['video_texture'], tag="video_image", width=900, height=506)
                 
                 dpg.add_spacer(height=8)
                 
@@ -1100,222 +1187,232 @@ def create_ui():
                     dpg.add_text("ChArUco:", color=Theme.TEXT_SECONDARY)
                     dpg.add_text("NOT DETECTED", tag="detection_status", color=Theme.NOT_DETECTING)
                 
-                dpg.add_spacer(height=16)
+                dpg.add_spacer(height=12)
                 
-                # Robot position display
-                dpg.add_text("ROBOT STATE", color=Theme.TEXT_SECONDARY)
-                dpg.add_spacer(height=4)
-                
-                with dpg.child_window(width=660, height=100, border=True):
-                    dpg.add_text("Position (xyz):", color=Theme.TEXT_MUTED)
-                    dpg.add_text("---", tag="position_display")
-                    dpg.add_spacer(height=4)
-                    dpg.add_text("Joint angles:", color=Theme.TEXT_MUTED)
-                    dpg.add_text("---", tag="joints_display")
-                
-                dpg.add_spacer(height=16)
-                
-                # Log window
-                dpg.add_text("LOG", color=Theme.TEXT_SECONDARY)
-                dpg.add_spacer(height=4)
-                
-                with dpg.child_window(width=660, height=120, border=True, tag="log_window"):
-                    dpg.add_text("Application started.", tag="log_text", wrap=640)
+                # Robot State and Log side by side
+                with dpg.group(horizontal=True):
+                    # Robot State
+                    with dpg.group():
+                        dpg.add_text("ROBOT STATE", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=4)
+                        with dpg.child_window(tag="robot_state_window", width=440, height=170, border=True, no_scrollbar=True):
+                            dpg.add_text("Position (xyz):", color=Theme.TEXT_MUTED)
+                            dpg.add_text("---", tag="position_display")
+                            dpg.add_spacer(height=6)
+                            dpg.add_text("Joint angles:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("---", tag="joints_display")
+                    
+                    dpg.add_spacer(width=16)
+                    
+                    # Log window
+                    with dpg.group():
+                        dpg.add_text("LOG", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=4)
+                        with dpg.child_window(tag="log_window", width=440, height=170, border=True):
+                            dpg.add_text("Application started.", tag="log_text", wrap=420)
             
-            dpg.add_spacer(width=16)
+            dpg.add_spacer(width=20)
             
             # ===== RIGHT COLUMN: Controls =====
-            with dpg.child_window(width=660, height=680, border=False, autosize_x=False, horizontal_scrollbar=False):
+            with dpg.child_window(tag="right_column", width=400, height=-1, border=False, no_scrollbar=True):
                 
                 # Tab bar for different modes
-                with dpg.group(width=640):
-                    with dpg.tab_bar():
+                with dpg.tab_bar(tag="main_tab_bar"):
+                    
+                    # ===== CAPTURE TAB =====
+                    with dpg.tab(label="CAPTURE"):
+                        dpg.add_spacer(height=8)
+                    
+                        # Capture status
+                        dpg.add_text("CAPTURE STATUS", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=6)
                         
-                        # ===== CAPTURE TAB =====
-                        with dpg.tab(label="CAPTURE"):
-                            dpg.add_spacer(height=8)
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Captured:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("0", tag="capture_count")
+                            dpg.add_text("/", color=Theme.TEXT_MUTED)
+                            dpg.add_text(str(state.target_captures), tag="target_count")
                         
-                            # Capture status
-                            dpg.add_text("CAPTURE STATUS", color=Theme.TEXT_SECONDARY)
-                            dpg.add_spacer(height=8)
-                            
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("Captured:", color=Theme.TEXT_MUTED)
-                                dpg.add_text("0", tag="capture_count")
-                                dpg.add_text("/", color=Theme.TEXT_MUTED)
-                                dpg.add_text(str(state.target_captures), tag="target_count")
-                            
-                            dpg.add_progress_bar(default_value=0.0, tag="capture_progress", width=600)
-                            
-                            dpg.add_spacer(height=16)
-                            
-                            # Capture buttons
-                            with dpg.group(horizontal=True):
-                                btn = dpg.add_button(label="AUTO RUN (FROM CONFIG)", callback=start_auto_capture, width=440, height=50)
-                                dpg.bind_item_theme(btn, ui_state['themes']['success'])
-                                
-                                dpg.add_spacer(width=16)
-                                
-                                btn = dpg.add_button(label="STOP", callback=stop_auto_capture, width=140, height=50)
-                                dpg.bind_item_theme(btn, ui_state['themes']['danger'])
-                                
-                            dpg.add_spacer(height=16)
-
-                            with dpg.group(horizontal=True):
-                                btn = dpg.add_button(label="CAPTURE POSE", callback=capture_pose, width=290, height=50)
-                                dpg.bind_item_theme(btn, ui_state['themes']['accent'])
-                                
-                                dpg.add_spacer(width=16)
-                                
-                                btn = dpg.add_button(label="CLEAR ALL", callback=clear_captures, width=290, height=50)
-                                dpg.bind_item_theme(btn, ui_state['themes']['danger'])
-                            
-                            dpg.add_spacer(height=24)
-                            dpg.add_separator()
-                            dpg.add_spacer(height=16)
-                            
-                            # Jog controls
-                            dpg.add_text("JOG CONTROLS", color=Theme.TEXT_SECONDARY)
-                            dpg.add_text("Hold buttons to move robot", color=Theme.TEXT_MUTED)
-                            dpg.add_spacer(height=12)
-                            
-                            # Translation controls
-                            with dpg.group(horizontal=True):
-                                with dpg.group():
-                                    dpg.add_text("Translation", color=Theme.ACCENT_PRIMARY)
-                                    dpg.add_spacer(height=4)
-                                    
-                                    with dpg.group(horizontal=True):
-                                        dpg.add_text("X:", color=Theme.TEXT_MUTED, indent=4)
-                                        create_jog_button("-", 0, -1)
-                                        create_jog_button("+", 0, 1)
-                                        dpg.add_spacer(width=20)
-                                        dpg.add_text("Y:", color=Theme.TEXT_MUTED)
-                                        create_jog_button("-", 1, -1)
-                                        create_jog_button("+", 1, 1)
-                                        dpg.add_spacer(width=20)
-                                        dpg.add_text("Z:", color=Theme.TEXT_MUTED)
-                                        create_jog_button("-", 2, -1)
-                                        create_jog_button("+", 2, 1)
-                            
-                            dpg.add_spacer(height=12)
-                            
-                            # Rotation controls
-                            with dpg.group(horizontal=True):
-                                with dpg.group():
-                                    dpg.add_text("Rotation", color=Theme.ACCENT_SECONDARY)
-                                    dpg.add_spacer(height=4)
-                                    
-                                    with dpg.group(horizontal=True):
-                                        dpg.add_text("Rx:", color=Theme.TEXT_MUTED)
-                                        create_jog_button("-", 3, -1)
-                                        create_jog_button("+", 3, 1)
-                                        dpg.add_spacer(width=16)
-                                        dpg.add_text("Ry:", color=Theme.TEXT_MUTED)
-                                        create_jog_button("-", 4, -1)
-                                        create_jog_button("+", 4, 1)
-                                        dpg.add_spacer(width=16)
-                                        dpg.add_text("Rz:", color=Theme.TEXT_MUTED)
-                                        create_jog_button("-", 5, -1)
-                                        create_jog_button("+", 5, 1)
-                            
-                            dpg.add_spacer(height=24)
-                            
-                            # Home button
-                            btn = dpg.add_button(label="GO HOME", callback=go_home, width=600, height=40)
+                        dpg.add_progress_bar(default_value=0.0, tag="capture_progress", width=360)
+                        
+                        dpg.add_spacer(height=12)
+                        
+                        # Capture buttons - use tags for dynamic sizing
+                        with dpg.group(horizontal=True):
+                            btn = dpg.add_button(label="AUTO RUN", tag="btn_auto_run", callback=start_auto_capture, width=250, height=44)
                             dpg.bind_item_theme(btn, ui_state['themes']['success'])
-                        
-                        # ===== CALIBRATE TAB =====
-                        with dpg.tab(label="CALIBRATE"):
-                            dpg.add_spacer(height=8)
                             
-                            dpg.add_text("CALIBRATION", color=Theme.TEXT_SECONDARY)
-                            dpg.add_spacer(height=8)
+                            dpg.add_spacer(width=10)
                             
-                            dpg.add_text(
-                                "Compute hand-eye calibration from captured poses.\n"
-                                "Requires at least 12 poses with ChArUco detection.",
-                                color=Theme.TEXT_MUTED, wrap=580
-                            )
+                            btn = dpg.add_button(label="STOP", tag="btn_stop", callback=stop_auto_capture, width=100, height=44)
+                            dpg.bind_item_theme(btn, ui_state['themes']['danger'])
                             
-                            dpg.add_spacer(height=16)
-                            
-                            btn = dpg.add_button(label="RUN CALIBRATION", callback=run_calibration, width=600, height=50)
+                        dpg.add_spacer(height=10)
+
+                        with dpg.group(horizontal=True):
+                            btn = dpg.add_button(label="CAPTURE", tag="btn_capture", callback=capture_pose, width=175, height=44)
                             dpg.bind_item_theme(btn, ui_state['themes']['accent'])
                             
-                            dpg.add_spacer(height=24)
-                            dpg.add_separator()
-                            dpg.add_spacer(height=16)
+                            dpg.add_spacer(width=10)
                             
-                            # Calibration results display
-                            dpg.add_text("CALIBRATION RESULT", color=Theme.TEXT_SECONDARY)
-                            dpg.add_spacer(height=8)
-                            
-                            with dpg.child_window(width=600, height=200, border=True):
-                                dpg.add_text("Status:", color=Theme.TEXT_MUTED)
-                                dpg.add_text("No calibration loaded", tag="calib_status")
-                                dpg.add_spacer(height=8)
-                                
-                                dpg.add_text("Translation (xyz):", color=Theme.TEXT_MUTED)
-                                dpg.add_text("---", tag="calib_translation")
-                                dpg.add_spacer(height=4)
-                                
-                                dpg.add_text("Quaternion (xyzw):", color=Theme.TEXT_MUTED)
-                                dpg.add_text("---", tag="calib_quaternion")
-                                dpg.add_spacer(height=4)
-                                
-                                dpg.add_text("Consistency Error:", color=Theme.TEXT_MUTED)
-                                dpg.add_text("---", tag="calib_error")
+                            btn = dpg.add_button(label="CLEAR ALL", tag="btn_clear", callback=clear_captures, width=175, height=44)
+                            dpg.bind_item_theme(btn, ui_state['themes']['danger'])
                         
-                        # ===== VERIFY TAB =====
-                        with dpg.tab(label="VERIFY"):
+                        dpg.add_spacer(height=16)
+                        dpg.add_separator()
+                        dpg.add_spacer(height=12)
+                        
+                        # Jog controls
+                        dpg.add_text("JOG CONTROLS", color=Theme.TEXT_SECONDARY)
+                        dpg.add_text("Hold buttons to move robot", color=Theme.TEXT_MUTED)
+                        dpg.add_spacer(height=10)
+                        
+                        with dpg.group(horizontal=True):
+                            # Translation Column
+                            with dpg.group():
+                                dpg.add_text("Translation", color=Theme.ACCENT_PRIMARY)
+                                dpg.add_spacer(height=4)
+                                # X
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("X:", color=Theme.TEXT_MUTED)
+                                    dpg.add_spacer(width=4)
+                                    create_jog_button("-", 0, -1, width=50, height=40)
+                                    create_jog_button("+", 0, 1, width=50, height=40)
+                                # Y
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Y:", color=Theme.TEXT_MUTED)
+                                    dpg.add_spacer(width=4)
+                                    create_jog_button("-", 1, -1, width=50, height=40)
+                                    create_jog_button("+", 1, 1, width=50, height=40)
+                                # Z
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Z:", color=Theme.TEXT_MUTED)
+                                    dpg.add_spacer(width=4)
+                                    create_jog_button("-", 2, -1, width=50, height=40)
+                                    create_jog_button("+", 2, 1, width=50, height=40)
+                            
+                            dpg.add_spacer(width=30)
+                            
+                            # Rotation Column
+                            with dpg.group():
+                                dpg.add_text("Rotation", color=Theme.ACCENT_SECONDARY)
+                                dpg.add_spacer(height=4)
+                                # Rx
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Rx:", color=Theme.TEXT_MUTED)
+                                    dpg.add_spacer(width=4)
+                                    create_jog_button("-", 3, -1, width=50, height=40)
+                                    create_jog_button("+", 3, 1, width=50, height=40)
+                                # Ry
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Ry:", color=Theme.TEXT_MUTED)
+                                    dpg.add_spacer(width=4)
+                                    create_jog_button("-", 4, -1, width=50, height=40)
+                                    create_jog_button("+", 4, 1, width=50, height=40)
+                                # Rz
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Rz:", color=Theme.TEXT_MUTED)
+                                    dpg.add_spacer(width=4)
+                                    create_jog_button("-", 5, -1, width=50, height=40)
+                                    create_jog_button("+", 5, 1, width=50, height=40)
+                        
+                        dpg.add_spacer(height=12)
+                        
+                        # Home button
+                        btn = dpg.add_button(label="GO HOME", tag="btn_go_home", callback=go_home, width=360, height=40)
+                        dpg.bind_item_theme(btn, ui_state['themes']['success'])
+                    
+                    # ===== CALIBRATE TAB =====
+                    with dpg.tab(label="CALIBRATE"):
+                        dpg.add_spacer(height=8)
+                        
+                        dpg.add_text("CALIBRATION", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=8)
+                        
+                        dpg.add_text(
+                            "Compute hand-eye calibration.\n"
+                            "Requires 12+ poses with ChArUco.",
+                            tag="calib_desc_text", color=Theme.TEXT_MUTED, wrap=350
+                        )
+                        
+                        dpg.add_spacer(height=16)
+                        
+                        btn = dpg.add_button(label="RUN CALIBRATION", tag="btn_run_calib", callback=run_calibration, width=360, height=44)
+                        dpg.bind_item_theme(btn, ui_state['themes']['accent'])
+                        
+                        dpg.add_spacer(height=16)
+                        dpg.add_separator()
+                        dpg.add_spacer(height=12)
+                        
+                        # Calibration results display
+                        dpg.add_text("CALIBRATION RESULT", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=8)
+                        
+                        with dpg.child_window(tag="calib_result_window", width=360, height=-1, border=True, no_scrollbar=True):
+                            dpg.add_text("Status:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("No calibration loaded", tag="calib_status")
+                            dpg.add_spacer(height=10)
+                            dpg.add_text("Translation (xyz):", color=Theme.TEXT_MUTED)
+                            dpg.add_text("---", tag="calib_translation")
+                            dpg.add_spacer(height=10)
+                            dpg.add_text("Quaternion (xyzw):", color=Theme.TEXT_MUTED)
+                            dpg.add_text("---", tag="calib_quaternion")
+                            dpg.add_spacer(height=10)
+                            dpg.add_text("Consistency Error:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("---", tag="calib_error")
+                    
+                    # ===== VERIFY TAB =====
+                    with dpg.tab(label="VERIFY"):
+                        dpg.add_spacer(height=8)
+                        
+                        dpg.add_text("VERIFICATION", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=8)
+                        
+                        dpg.add_text(
+                            "Verify calibration with ChArUco board.\n"
+                            "- CHECK: Home - Detect - Plot\n"
+                            "- VISIT: Tour board corners",
+                            tag="verify_desc_text", color=Theme.TEXT_MUTED, wrap=350
+                        )
+                        
+                        dpg.add_spacer(height=12)
+                        
+                        with dpg.group(horizontal=True):
+                            btn_check = dpg.add_button(label="CHECK FRAMES", tag="btn_check_frames", callback=check_frames_visualizer, width=175, height=44)
+                            dpg.bind_item_theme(btn_check, ui_state['themes']['accent'])
+                            
+                            dpg.add_spacer(width=10)
+                            
+                            btn_visit = dpg.add_button(label="VISIT CORNERS", tag="btn_visit_corners", callback=start_visit_corners, width=175, height=44)
+                            dpg.bind_item_theme(btn_visit, ui_state['themes']['accent'])
+                        
+                        dpg.add_spacer(height=16)
+                        dpg.add_separator()
+                        dpg.add_spacer(height=12)
+                        
+                        # Verification status
+                        dpg.add_text("VERIFICATION STATUS", color=Theme.TEXT_SECONDARY)
+                        dpg.add_spacer(height=8)
+                        
+                        with dpg.child_window(tag="verify_status_window", width=360, height=-1, border=True, no_scrollbar=True):
+                            dpg.add_text("Calibration:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("Not loaded", tag="verify_calib_status", color=Theme.ACCENT_WARNING)
                             dpg.add_spacer(height=8)
-                            
-                            dpg.add_text("VERIFICATION", color=Theme.TEXT_SECONDARY)
+                            dpg.add_text("ChArUco:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("Not detected", tag="verify_detection_status", color=Theme.ACCENT_WARNING)
                             dpg.add_spacer(height=8)
-                            
-                            dpg.add_text(
-                                "Verify calibration by aligning the robot with the ChArUco board.\n\n"
-                                "Functions:\n"
-                                "- CHECK CURRENT FRAMES: Home Robot -> Detect -> Show Plot (No further movement)\n"
-                                "- VISIT CORNERS: Uses detection from 'Check' to Visit Board Center & Corners -> Home",
-                                color=Theme.TEXT_MUTED, wrap=580
-                            )
-                            
-                            dpg.add_spacer(height=16)
-                            
-                            with dpg.group(horizontal=True):
-                                btn_check = dpg.add_button(label="CHECK CURRENT FRAMES", callback=check_frames_visualizer, width=290, height=50)
-                                dpg.bind_item_theme(btn_check, ui_state['themes']['accent'])
-                                
-                                dpg.add_spacer(width=20)
-                                
-                                btn_visit = dpg.add_button(label="VISIT CORNERS", callback=start_visit_corners, width=290, height=50)
-                                dpg.bind_item_theme(btn_visit, ui_state['themes']['accent'])
-                            
-                            dpg.add_spacer(height=24)
-                            dpg.add_separator()
-                            dpg.add_spacer(height=16)
-                            
-                            # Verification info
-                            dpg.add_text("VERIFICATION STATUS", color=Theme.TEXT_SECONDARY)
-                            dpg.add_spacer(height=8)
-                            
-                            with dpg.child_window(width=600, height=150, border=True):
-                                dpg.add_text("Calibration:", color=Theme.TEXT_MUTED)
-                                dpg.add_text("Not loaded", tag="verify_calib_status", color=Theme.ACCENT_WARNING)
-                                dpg.add_spacer(height=8)
-                                
-                                dpg.add_text("ChArUco Detection:", color=Theme.TEXT_MUTED)
-                                dpg.add_text("Not detected", tag="verify_detection_status", color=Theme.ACCENT_WARNING)
-                                dpg.add_spacer(height=8)
-                                
-                                dpg.add_text("Board Position (camera frame):", color=Theme.TEXT_MUTED)
-                                dpg.add_text("---", tag="verify_board_pos")
+                            dpg.add_text("Board Position:", color=Theme.TEXT_MUTED)
+                            dpg.add_text("---", tag="verify_board_pos")
+    
+    # Bind resize handler to primary window
+    dpg.bind_item_handler_registry("primary_window", "viewport_resize_handler")
     
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.set_primary_window("primary_window", True)
+    
+    # Initial layout update
+    on_viewport_resize()
 
 
 def update_ui():
