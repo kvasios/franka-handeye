@@ -243,11 +243,29 @@ class AppState:
                     self.calibration_result = json.load(f)
                 print("Loaded existing calibration.")
             
-            # Count existing captures
+            # Load existing captures (count and joint poses)
             if self.output_dir.exists():
-                existing = [d for d in self.output_dir.iterdir() 
-                           if d.is_dir() and d.name.startswith("pose_")]
+                existing = sorted([d for d in self.output_dir.iterdir() 
+                           if d.is_dir() and d.name.startswith("pose_")])
                 self.captured_count = len(existing)
+                
+                # Load joint poses from existing captured data
+                self.captured_poses = []
+                for pose_dir in existing:
+                    data_file = pose_dir / "data.json"
+                    if data_file.exists():
+                        try:
+                            with open(data_file, 'r') as f:
+                                data = json.load(f)
+                                if 'joint_pose' in data:
+                                    self.captured_poses.append(data['joint_pose'])
+                        except Exception as e:
+                            print(f"Warning: Could not load {data_file}: {e}")
+                
+                if self.captured_poses:
+                    print(f"Loaded {len(self.captured_poses)} existing joint poses.")
+                    # Sync joint_poses.yaml with loaded poses
+                    self._sync_poses_config()
             
             self._initialized = True
             return True
@@ -255,6 +273,21 @@ class AppState:
         except Exception as e:
             print(f"Initialization Error: {e}")
             return False
+    
+    def _sync_poses_config(self):
+        """Sync joint_poses.yaml with captured_poses list."""
+        if not self.captured_poses:
+            return
+        
+        yaml_content = "joint_poses:\n"
+        for pose in self.captured_poses:
+            pose_str = "  - [" + ", ".join([f"{x:.4f}" for x in pose]) + "]\n"
+            yaml_content += pose_str
+        
+        self.poses_config_path.parent.mkdir(exist_ok=True)
+        with open(self.poses_config_path, 'w') as f:
+            f.write(yaml_content)
+        print(f"Synced {len(self.captured_poses)} poses to {self.poses_config_path}")
     
     def connect_robot(self) -> bool:
         """
