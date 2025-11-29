@@ -38,6 +38,22 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Configuration
+
+### ⚠️ CRITICAL: Calibration Board Setup
+
+1.  **Print Board**: The Charuco board file is located at `config/charuco_board_5x7.png`. Print this file on A4 or Letter paper.
+2.  **Measure**: After printing, you **MUST measure** the physical dimensions of the squares and markers on your paper.
+3.  **Update Config**: Edit `config/calibration_board_parameters.yaml` with your measured values:
+    *   `square_length`: Side length of a checkerboard square (in meters).
+    *   `marker_length`: Side length of an ArUco marker (in meters).
+
+*Failure to update these values will result in incorrect calibration!*
+
+### Joint Poses
+*   `config/joint_poses.yaml`: Contains the 12 poses used for Auto Capture.
+
+
 ## Quick Start
 
 Run the GUI application:
@@ -58,9 +74,6 @@ python franka-handeye-app.py --host <ROBOT_IP>
     *   **Check Frames**: Visualizes the computed frame alignment.
     *   **Visit Corners**: Robot physically traces the board corners to verify accuracy.
 
-## Configuration
-*   **Board**: Update `config/calibration_board_parameters.yaml` with your physical board measurements.
-*   **Poses**: `config/joint_poses.yaml` contains the 12 poses used for Auto Capture.
 
 ## Headless / Scripts
 Individual scripts are available in `scripts/` for CI or headless operation:
